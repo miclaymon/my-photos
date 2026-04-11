@@ -1,0 +1,54 @@
+# ─── Nuxt / build outputs ─────────────────────────────────────────────────────
+.output
+.data
+.nuxt
+.nitro
+.cache
+dist
+
+# ─── Node ─────────────────────────────────────────────────────────────────────
+node_modules
+
+# ─── Environment ──────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── Database (SQLite) ────────────────────────────────────────────────────────
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# ─── TypeScript ───────────────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Test outputs ─────────────────────────────────────────────────────────────
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.vitest-cache/
+
+# ─── Editor / IDE ─────────────────────────────────────────────────────────────
+# .vscode/ is intentionally NOT ignored — commit shared settings/extensions
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+ehthumbs.db

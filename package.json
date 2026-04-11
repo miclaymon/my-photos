@@ -1,0 +1,33 @@
+{
+  "name": "my-photos-nuxt",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio",
+    "db:seed": "tsx scripts/seed.ts"
+  },
+  "dependencies": {
+    "@nuxt/image": "^1.10.0",
+    "@nuxtjs/tailwindcss": "^6.13.2",
+    "better-sqlite3": "^11.9.1",
+    "drizzle-orm": "^0.45.2",
+    "nuxt": "^3.16.2",
+    "nuxt-auth-utils": "^0.5.16",
+    "vue": "latest",
+    "vue-router": "latest"
+  },
+  "devDependencies": {
+    "@nuxt/devtools": "latest",
+    "@types/better-sqlite3": "^7.6.13",
+    "drizzle-kit": "^0.31.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}
