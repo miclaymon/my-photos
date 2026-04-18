@@ -13,6 +13,7 @@ node_modules
 .env
 .env.*
 !.env.example
+eng.traineddata
 
 # ─── Database (SQLite) ────────────────────────────────────────────────────────
 data/
@@ -39,10 +40,12 @@ blob-report/
 
 # ─── Editor / IDE ─────────────────────────────────────────────────────────────
 # .vscode/ is intentionally NOT ignored — commit shared settings/extensions
+.directory
 .idea/
 *.swp
 *.swo
 *~
+desktop.ini
 
 # ─── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store
@@ -52,3 +55,13 @@ blob-report/
 Thumbs.db
 desktop.ini
 ehthumbs.db
+
+# ─── Development Docs ─────────────────────────────────────────────────────────
+.mcp.json
+.claude/*
+AGENTS.md
+CLAUDE.md
+DESIGN.md
+REQUIREMENTS.md
+PLANNING.md
+TODO.md
