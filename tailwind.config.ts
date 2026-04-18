@@ -9,7 +9,12 @@ export default {
     './composables/**/*.{ts,vue}',
   ],
   theme: {
-    extend: {},
+    extend: {
+      fontFamily: {
+        sans: ['Instrument Sans', 'system-ui', 'sans-serif'],
+        mono: ['Geist Mono', 'ui-monospace', 'monospace'],
+      },
+    },
   },
   plugins: [],
 } satisfies Config

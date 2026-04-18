@@ -8,6 +8,76 @@
       "when": 1775924502732,
       "tag": "0000_tidy_toad_men",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1775943871679,
+      "tag": "0001_nappy_maginty",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1744416000000,
+      "tag": "0002_media_extensions",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1744502400000,
+      "tag": "0003_library_access_share_links",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1744675200000,
+      "tag": "0004_albums",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1744761600000,
+      "tag": "0005_background_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1744848000000,
+      "tag": "0006_subjects_pet_class",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1744934400000,
+      "tag": "0007_detection_scores",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1745020800000,
+      "tag": "0008_subject_cover_media",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1745107200000,
+      "tag": "0009_favorites_and_tags",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1745193600000,
+      "tag": "0010_location_label",
+      "breakpoints": true
     }
   ]
 }

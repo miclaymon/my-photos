@@ -3,19 +3,38 @@ export default defineNuxtConfig({
   compatibilityDate: '2025-01-01',
   devtools: { enabled: true },
 
+  // Inline script runs before first paint — prevents theme FOUC on reload.
+  // Reads 'app-theme' from localStorage and sets data-theme on <html>
+  // so the correct CSS variables are in place before any content renders.
+  app: {
+    head: {
+      script: [
+        {
+          innerHTML: `(function(){try{var t=localStorage.getItem('app-theme')||'light';if(t==='system')t=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';if(t!=='light')document.documentElement.setAttribute('data-theme',t);}catch(e){}})()`,
+        },
+      ],
+    },
+  },
+
   modules: [
     '@nuxt/image',
     '@nuxtjs/tailwindcss',
     'nuxt-auth-utils',
+    ['@nuxt/fonts', {
+      families: [
+        { name: 'Instrument Sans', provider: 'google' },
+        { name: 'Geist Mono', provider: 'google' },
+      ],
+      defaults: { weights: [400, 500, 600, 700] },
+    }],
   ],
+
+  css: ['~/assets/css/main.css'],
 
   // @nuxt/image configuration
   image: {
-    // Default image quality for optimization
     quality: 80,
-    // Formats to generate (webp preferred, fallback to original)
     format: ['webp', 'jpeg', 'png'],
-    // Screens for responsive srcset generation
     screens: {
       xs: 320,
       sm: 640,
@@ -24,29 +43,45 @@ export default defineNuxtConfig({
       xl: 1280,
       xxl: 1536,
     },
+    domains: ['localhost'],
   },
 
-  // Server-side runtime config — all values are private (never sent to the browser).
-  // Each key maps to an env var: NUXT_<SCREAMING_SNAKE> or the explicit env var below.
+  // Server-side runtime config
   runtimeConfig: {
-    // Auth — overridden by NUXT_SESSION_PASSWORD
     session: {
-      maxAge: 60 * 60 * 24 * 7, // 7 days
+      maxAge: 60 * 60 * 24 * 7,
     },
+    storageEndpoint: '',
+    storageAccessKeyId: '',
+    storageSecretAccessKey: '',
+    storageBucketName: 'photos',
+    storageRegion: 'us-east-1',
+    storageMaxVersions: 3,
+  },
 
-    // Object storage (S3-compatible — RustFS by default)
-    storageEndpoint: '',          // STORAGE_ENDPOINT
-    storageAccessKeyId: '',       // STORAGE_ACCESS_KEY_ID
-    storageSecretAccessKey: '',   // STORAGE_SECRET_ACCESS_KEY
-    storageBucketName: 'photos',  // STORAGE_BUCKET_NAME
-    storageRegion: 'us-east-1',   // STORAGE_REGION
+  // Register all components by filename only, regardless of subdirectory
+  components: {
+    dirs: [{ path: '~/components', pathPrefix: false }],
+  },
 
-    // Versioning: max photo versions to retain per object (0 = disabled)
-    storageMaxVersions: 3,        // STORAGE_MAX_VERSIONS
+  // Enable View Transitions API for page navigations.
+  // Album card covers use matching view-transition-name to animate into the
+  // album detail page hero, giving a connected, native-app-style transition.
+  experimental: {
+    viewTransition: true,
   },
 
   typescript: {
     strict: true,
-    typeCheck: false, // Enable in CI or on-demand; slows dev server
+    typeCheck: false,
+  },
+
+  // Prevent Nitro/Rollup from trying to bundle native Node.js addons (.node files).
+  // @tensorflow/tfjs-node and face-api.js both rely on native bindings that must
+  // be required at runtime by Node — they cannot be inlined into a Rollup bundle.
+  nitro: {
+    rollupConfig: {
+      external: [/\.node$/, '@tensorflow/tfjs-node'],
+    },
   },
 })
