@@ -15,6 +15,9 @@ warn()    { echo -e "${YEL}${BLD}  ⚠${RST} $*"; }
 error()   { echo -e "${RED}${BLD}  ✗${RST} $*" >&2; }
 header()  { echo -e "\n${BLD}$*${RST}"; }
 
+# Run from the web/ directory
+cd "$(dirname "$0")"
+
 # ─── 1. prerequisites ─────────────────────────────────────────────────────────
 header "Checking prerequisites…"
 
@@ -77,6 +80,11 @@ if [[ ${#NUXT_SESSION_PASSWORD} -lt 32 ]]; then
   error "NUXT_SESSION_PASSWORD must be at least 32 characters."
   exit 1
 fi
+
+if [[ -z "${DATA_API_URL:-}" ]]; then
+  warn "DATA_API_URL is not set in .env — the web client will not be able to reach the API server."
+  warn "Set DATA_API_URL to the FastAPI server URL (e.g. http://localhost:8000) and re-run."
+fi
 success "Environment variables look good"
 
 # ─── 3. install dependencies ──────────────────────────────────────────────────
@@ -84,60 +92,9 @@ header "Installing dependencies…"
 npm install
 success "Dependencies installed"
 
-# ─── 4. database ──────────────────────────────────────────────────────────────
-header "Setting up database…"
-
-DB_PATH="${DATABASE_PATH:-./data/photos.db}"
-DB_DIR=$(dirname "$DB_PATH")
-mkdir -p "$DB_DIR"
-
-info "Generating migrations from schema…"
-npm run db:generate
-
-info "Applying migrations…"
-npm run db:migrate
-success "Database ready at ${DB_PATH}"
-
-# ─── 5. seed first user ───────────────────────────────────────────────────────
-header "First user account…"
-
-# Check if any user already exists
-USER_COUNT=$(node -e "
-  const Database = require('better-sqlite3');
-  try {
-    const db = new Database('${DB_PATH}', { readonly: true });
-    const row = db.prepare('SELECT COUNT(*) as n FROM users').get();
-    process.stdout.write(String(row.n));
-    db.close();
-  } catch { process.stdout.write('0'); }
-" 2>/dev/null || echo "0")
-
-if [[ "$USER_COUNT" -gt 0 ]]; then
-  success "User account already exists — skipping seed"
-elif [[ ! -t 0 ]]; then
-  # stdin is not a terminal (piped/non-interactive) — skip interactive prompt
-  warn "No users found and stdin is not a terminal."
-  warn "Run  npm run db:seed -- <email> <password>  to create a user."
-else
-  echo ""
-  echo -e "  ${BLD}No users found. Create an admin account:${RST}"
-  SEED_EMAIL=""
-  SEED_PASS=""
-  read -rp "  Email:    " SEED_EMAIL || true
-  read -rsp "  Password: " SEED_PASS || true
-  echo ""
-
-  if [[ -z "$SEED_EMAIL" || -z "$SEED_PASS" ]]; then
-    warn "Email or password was empty — skipping user creation."
-    warn "Run  npm run db:seed -- <email> <password>  to create a user later."
-  else
-    npm run db:seed -- "$SEED_EMAIL" "$SEED_PASS"
-    success "User created: ${SEED_EMAIL}"
-  fi
-fi
-
 # ─── done ─────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${GRN}${BLD}  Setup complete!${RST}"
-echo -e "  Run ${CYN}./start-dev.sh${RST} to start the development server."
+echo -e "${GRN}${BLD}  Web client setup complete!${RST}"
+echo -e "  Make sure the API server is running: ${CYN}cd ../api && ./start-dev.sh${RST}"
+echo -e "  Then run ${CYN}./start-dev.sh${RST} to start the web dev server."
 echo ""

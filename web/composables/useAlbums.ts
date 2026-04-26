@@ -18,6 +18,21 @@ export interface AlbumSummary {
   updatedAt: string
 }
 
+// Map the snake_case API response to the camelCase AlbumSummary shape.
+function mapAlbum(raw: Record<string, unknown>): AlbumSummary {
+  return {
+    id:        raw.id        as string,
+    name:      raw.name      as string,
+    libraryId: raw.library_id as string,
+    ownerId:   raw.owner_id  as number,
+    itemCount: raw.item_count as number,
+    canEdit:   raw.can_edit  as boolean,
+    coverUrls: (raw.cover_urls ?? []) as string[],
+    createdAt: raw.created_at as string,
+    updatedAt: raw.updated_at as string,
+  }
+}
+
 export function useAlbums(libraryId: MaybeRefOrGetter<string | null>) {
   const albums    = ref<AlbumSummary[]>([])
   const isLoading = ref(false)
@@ -29,8 +44,8 @@ export function useAlbums(libraryId: MaybeRefOrGetter<string | null>) {
     isLoading.value = true
     error.value     = null
     try {
-      const data = await $fetch<{ albums: AlbumSummary[] }>(`/api/v1/library/${id}/albums`)
-      albums.value = data.albums
+      const data = await $fetch<{ albums: Record<string, unknown>[] }>(`/api/v1/library/${id}/albums`)
+      albums.value = data.albums.map(mapAlbum)
     } catch {
       error.value = 'Could not load albums.'
     } finally {
@@ -42,12 +57,12 @@ export function useAlbums(libraryId: MaybeRefOrGetter<string | null>) {
     const id = toValue(libraryId)
     if (!id) return null
     try {
-      const data = await $fetch<AlbumSummary>(`/api/v1/library/${id}/albums`, {
+      const data = await $fetch<Record<string, unknown>>(`/api/v1/library/${id}/albums`, {
         method: 'POST',
         body:   { name },
       })
       await fetchAlbums()
-      return data
+      return mapAlbum(data)
     } catch {
       return null
     }
@@ -89,8 +104,8 @@ export function useAllAlbums() {
     isLoading.value = true
     error.value     = null
     try {
-      const data   = await $fetch<{ albums: AlbumSummary[] }>('/api/v1/albums')
-      albums.value = data.albums
+      const data   = await $fetch<{ albums: Record<string, unknown>[] }>('/api/v1/albums')
+      albums.value = data.albums.map(mapAlbum)
     } catch {
       error.value = 'Could not load albums.'
     } finally {

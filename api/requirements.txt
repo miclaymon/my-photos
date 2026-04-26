@@ -1,0 +1,50 @@
+# ─── Web framework ────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+psycopg2-binary>=2.9.0
+
+# ─── Auth ─────────────────────────────────────────────────────────────────────
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.0.0
+
+# ─── Config ───────────────────────────────────────────────────────────────────
+pydantic-settings>=2.0.0
+email-validator>=2.0.0
+python-dotenv>=1.0.0
+
+# ─── Object storage ───────────────────────────────────────────────────────────
+boto3>=1.34.0
+
+# ─── Background workers ───────────────────────────────────────────────────────
+numpy>=1.26.0
+Pillow>=10.0.0
+pytesseract>=0.3.10   # optional: requires system 'tesseract' binary
+easyocr>=1.7.1        # default OCR provider — pure Python, no system deps
+requests>=2.31.0
+
+# ─── Geocoding ────────────────────────────────────────────────────────────────
+reverse_geocoder>=1.5.1
+
+# ─── Object detection ─────────────────────────────────────────────────────────
+onnxruntime>=1.18.0
+ultralytics>=8.2.0    # required once for ONNX model export on first run
+
+# ─── Face detection ───────────────────────────────────────────────────────────
+insightface>=0.7.3
+opencv-python-headless>=4.9.0
+# face-recognition>=1.3.0  # alternative; requires cmake + dlib
+
+# ─── Barcode detection ────────────────────────────────────────────────────────
+zxing-cpp>=2.2.0
+# pyzbar>=0.1.10  # alternative, requires libzbar-dev system package
+
+# ─── Video processing ─────────────────────────────────────────────────────────
+ffmpeg-python>=0.2.0
+
+# ─── ML workers (optional — comment out if not using a GPU machine) ───────────
+# tensorflow-cpu>=2.15.0

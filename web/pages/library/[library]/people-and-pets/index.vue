@@ -13,18 +13,50 @@ interface SubjectSummary {
   type:         'person' | 'pet'
   name:         string | null
   hidden:       boolean
+  petClass:     string[] | null
   photoCount:   number
   thumbnailUrl: string | null
   boundingBox:  { x: number; y: number; w: number; h: number } | null
 }
 
-const { data, pending, refresh } = await useFetch<{ subjects: SubjectSummary[] }>(
+function mapSubject(raw: Record<string, unknown>): SubjectSummary {
+  return {
+    id:           raw.id           as string,
+    type:         raw.type         as 'person' | 'pet',
+    name:         raw.name         as string | null,
+    hidden:       raw.hidden       as boolean,
+    petClass:     (raw.pet_class   as string[] | null) ?? null,
+    photoCount:   raw.photo_count  as number,
+    thumbnailUrl: raw.thumbnail_url as string | null,
+    boundingBox:  raw.bounding_box as { x: number; y: number; w: number; h: number } | null,
+  }
+}
+
+const { data: rawData, pending, refresh: rawRefresh } = await useFetch<{ subjects: Record<string, unknown>[] }>(
   () => `/api/v1/library/${libraryId.value}/subjects`,
 )
 
+const data = computed(() => ({
+  subjects: (rawData.value?.subjects ?? []).map(mapSubject),
+}))
+
+async function refresh() {
+  await rawRefresh()
+}
+
 // Re-fetch whenever the list page is mounted so cover changes set on the detail
 // page are reflected immediately when the user navigates back.
-onMounted(() => refresh())
+onMounted(() => {
+  refresh()
+  window.addEventListener('mousemove', onWindowMousemove)
+  window.addEventListener('mouseup',   onWindowMouseup)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('mousemove', onWindowMousemove)
+  window.removeEventListener('mouseup',   onWindowMouseup)
+  removeDragGhost()
+})
 
 const visible = computed(() => (data.value?.subjects ?? []).filter(s => !s.hidden))
 const hidden  = computed(() => (data.value?.subjects ?? []).filter(s => s.hidden))
@@ -76,12 +108,20 @@ async function commitRename() {
     await $fetch(`/api/v1/subjects/${id}`, { method: 'PATCH', body: { name } })
     await refresh()
   } catch (err: any) {
-    const errData = err?.data ?? err?.response?._data
-    if (err?.statusCode === 409 || err?.response?.status === 409) {
-      const conflicting = (errData?.data ?? errData) as { existingId: string; existingName: string }
+    const status   = err?.statusCode ?? err?.response?.status
+    const errData  = err?.data ?? err?.response?._data
+    if (status === 409) {
+      // Name conflict — ask the user if these are the same person
+      const detail = errData?.detail ?? errData
+      const existingSubject = (data.value?.subjects ?? []).find(s => s.id === detail?.existing_id)
       mergeFrom.value    = id
       mergeName.value    = name ?? ''
-      mergeTarget.value  = { id: conflicting.existingId, name: conflicting.existingName }
+      mergeContext.value = 'rename'
+      mergeTarget.value  = {
+        id:           detail?.existing_id  ?? '',
+        name:         detail?.existing_name ?? name ?? '',
+        thumbnailUrl: existingSubject?.thumbnailUrl ?? null,
+      }
       return
     }
     console.error('Rename failed', err)
@@ -90,23 +130,149 @@ async function commitRename() {
 
 // ── Merge dialog ──────────────────────────────────────────────────────────────
 
-const mergeFrom   = ref<string | null>(null)
-const mergeName   = ref('')
-const mergeTarget = ref<{ id: string; name: string } | null>(null)
+interface MergeTarget { id: string; name: string; thumbnailUrl?: string | null }
+
+const mergeFrom    = ref<string | null>(null)
+const mergeName    = ref('')
+const mergeTarget  = ref<MergeTarget | null>(null)
+const mergeContext = ref<'rename' | 'drag'>('rename')
+
+const mergeSourceSubject = computed(() =>
+  mergeFrom.value ? (data.value?.subjects ?? []).find(s => s.id === mergeFrom.value) ?? null : null
+)
 
 function closeMerge() {
   mergeFrom.value   = null
   mergeTarget.value = null
 }
 
+/** Keep separate: force-rename the source subject without merging. */
+async function keepSeparate() {
+  if (!mergeFrom.value) return
+  const id   = mergeFrom.value
+  const name = mergeName.value || null
+  closeMerge()
+  try {
+    await $fetch(`/api/v1/subjects/${id}`, { method: 'PATCH', body: { name, force: true } })
+    await refresh()
+  } catch (err) {
+    console.error('Force rename failed', err)
+  }
+}
+
+/** Merge: absorb mergeFrom into mergeTarget (target survives). */
 async function confirmMerge() {
   if (!mergeFrom.value || !mergeTarget.value) return
-  await $fetch(`/api/v1/subjects/${mergeFrom.value}/merge`, {
+  // The target (URL) survives; the source (body.merge_subject_id) is absorbed + deleted.
+  await $fetch(`/api/v1/subjects/${mergeTarget.value.id}/merge`, {
     method: 'POST',
-    body: { intoId: mergeTarget.value.id, name: mergeName.value || mergeTarget.value.name },
+    body: { merge_subject_id: mergeFrom.value, name: mergeName.value || mergeTarget.value.name },
   })
   closeMerge()
   await refresh()
+}
+
+// ── Drag-to-merge ─────────────────────────────────────────────────────────────
+
+const dragSubject = ref<SubjectSummary | null>(null)
+const dragOverId  = ref<string | null>(null)
+const isDragging  = ref(false)
+let dragStartX    = 0
+let dragStartY    = 0
+let dragGhostEl: HTMLElement | null = null
+const DRAG_THRESHOLD = 8
+
+function onThumbMousedown(s: SubjectSummary, e: MouseEvent) {
+  if (e.button !== 0) return
+  if (editingId.value) return       // don't drag while a rename input is open
+  if (mergeTarget.value) return     // don't drag while merge dialog is open
+  dragSubject.value = s
+  dragStartX        = e.clientX
+  dragStartY        = e.clientY
+  isDragging.value  = false
+}
+
+function onWindowMousemove(e: MouseEvent) {
+  if (!dragSubject.value) return
+
+  const dx = e.clientX - dragStartX
+  const dy = e.clientY - dragStartY
+
+  if (!isDragging.value) {
+    if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return
+    isDragging.value = true
+    createDragGhost(dragSubject.value, e.clientX, e.clientY)
+  }
+
+  moveDragGhost(e.clientX, e.clientY)
+
+  // Hit-test: find the card element under the cursor
+  const els = document.elementsFromPoint(e.clientX, e.clientY)
+  let overId: string | null = null
+  for (const el of els) {
+    const card = (el as HTMLElement).closest('[data-subject-id]') as HTMLElement | null
+    if (card) {
+      const id = card.dataset.subjectId
+      if (id && id !== dragSubject.value!.id) {
+        const t = (data.value?.subjects ?? []).find(s => s.id === id)
+        if (t?.type === dragSubject.value!.type) { overId = id }
+        break
+      }
+    }
+  }
+  dragOverId.value = overId
+}
+
+function onWindowMouseup(e: MouseEvent) {
+  if (!dragSubject.value) return
+
+  const source = dragSubject.value
+
+  if (isDragging.value && dragOverId.value) {
+    // Drop on a target card — open merge dialog
+    const target = (data.value?.subjects ?? []).find(s => s.id === dragOverId.value)
+    if (target && target.type === source.type) {
+      mergeFrom.value    = source.id
+      mergeTarget.value  = { id: target.id, name: target.name ?? 'Unknown', thumbnailUrl: target.thumbnailUrl }
+      mergeName.value    = target.name ?? source.name ?? ''
+      mergeContext.value = 'drag'
+    }
+  } else if (!isDragging.value) {
+    // Plain click — navigate to the subject's detail page
+    navigateTo(subjectHref(source))
+  }
+
+  removeDragGhost()
+  dragSubject.value = null
+  dragOverId.value  = null
+  isDragging.value  = false
+}
+
+function createDragGhost(s: SubjectSummary, x: number, y: number) {
+  const el = document.createElement('div')
+  el.className = 'pap-drag-ghost'
+  if (s.thumbnailUrl) {
+    el.style.backgroundImage    = `url(${s.thumbnailUrl})`
+    el.style.backgroundSize     = '100%'
+    el.style.backgroundPosition = 'center center'
+    el.style.backgroundRepeat   = 'no-repeat'
+  }
+  el.style.left = `${x - 48}px`
+  el.style.top  = `${y - 48}px`
+  document.body.appendChild(el)
+  dragGhostEl = el
+}
+
+function moveDragGhost(x: number, y: number) {
+  if (dragGhostEl) {
+    dragGhostEl.style.left = `${x - 48}px`
+    dragGhostEl.style.top  = `${y - 48}px`
+  }
+}
+
+function removeDragGhost() {
+  dragGhostEl?.remove()
+  dragGhostEl = null
 }
 
 // ── Hide / Unhide ─────────────────────────────────────────────────────────────
@@ -115,9 +281,8 @@ async function toggleHidden(subject: SubjectSummary, event: Event) {
   event.preventDefault()
   event.stopPropagation()
   const newHidden = !subject.hidden
-  // Optimistic update — mutate the cached data directly so the UI responds
-  // instantly without triggering a full re-fetch (which would reload all images).
-  const row = data.value?.subjects.find(s => s.id === subject.id)
+  // Optimistic update — mutate the raw fetched data directly
+  const row = rawData.value?.subjects.find(s => (s as Record<string, unknown>).id === subject.id) as Record<string, unknown> | undefined
   if (row) row.hidden = newHidden
   try {
     await $fetch(`/api/v1/subjects/${subject.id}`, { method: 'PATCH', body: { hidden: newHidden } })
@@ -129,36 +294,14 @@ async function toggleHidden(subject: SubjectSummary, event: Event) {
 
 // ── Face / pet crop CSS ───────────────────────────────────────────────────────
 
-const THUMB_SIZE = 96
 
 function faceStyle(s: SubjectSummary): Record<string, string> {
   if (!s.thumbnailUrl) return {}
-  if (!s.boundingBox) {
-    return {
-      backgroundImage:    `url(${s.thumbnailUrl})`,
-      backgroundSize:     'cover',
-      backgroundPosition: 'center',
-    }
-  }
-
-  const { x, y, w, h } = s.boundingBox
-  const pad = 0.4
-
-  const cx  = x + w / 2
-  const cy  = y + h / 2
-  const pw  = Math.min(w * (1 + pad * 2), 1)
-  const ph  = Math.min(h * (1 + pad * 2), 1)
-  const ox  = Math.max(0, Math.min(cx - pw / 2, 1 - pw))
-  const oy  = Math.max(0, Math.min(cy - ph / 2, 1 - ph))
-
-  const imgW = THUMB_SIZE / pw
-  const imgH = THUMB_SIZE / ph
-
   return {
     backgroundImage:    `url(${s.thumbnailUrl})`,
-    backgroundSize:     `${imgW}px ${imgH}px`,
-    backgroundPosition: `-${ox * imgW}px -${oy * imgH}px`,
     backgroundRepeat:   'no-repeat',
+    backgroundSize:     '100%',
+    backgroundPosition: 'center center',
   }
 }
 </script>
@@ -189,13 +332,26 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
           People
         </h2>
         <div class="pap-grid">
-          <div v-for="s in people" :key="s.id" class="pap-card">
-            <!-- Thumbnail → navigates to detail page -->
-            <NuxtLink :to="subjectHref(s)" class="pap-thumb-link">
+          <div
+            v-for="s in people"
+            :key="s.id"
+            class="pap-card"
+            :class="{
+              'is-drag-source': isDragging && dragSubject?.id === s.id,
+              'is-drag-over':   dragOverId === s.id,
+            }"
+            :data-subject-id="s.id"
+          >
+            <!-- Thumbnail — drag initiates here; plain click navigates (handled in mouseup) -->
+            <div
+              class="pap-thumb-link"
+              :title="isDragging ? undefined : 'View collection'"
+              @mousedown.left.stop="onThumbMousedown(s, $event)"
+            >
               <div class="pap-thumb" :style="faceStyle(s)">
                 <UserIcon v-if="!s.thumbnailUrl" :size="28" class="pap-thumb-placeholder" />
               </div>
-            </NuxtLink>
+            </div>
 
             <div class="pap-card-body">
               <template v-if="editingId === s.id">
@@ -223,6 +379,7 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
                   class="pap-name-btn"
                   :class="{ 'is-unnamed': !s.name }"
                   :title="s.name ? 'Rename' : 'Add a name'"
+                  @mousedown.stop
                   @click="startRename(s, $event)"
                 >
                   <PencilIcon :size="10" class="pap-name-edit-icon" />
@@ -233,7 +390,7 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
               <span class="pap-count">{{ s.photoCount }} {{ s.photoCount === 1 ? 'photo' : 'photos' }}</span>
             </div>
 
-            <button class="pap-hide-btn" title="Hide from People & Pets" @click="toggleHidden(s, $event)">
+            <button class="pap-hide-btn" title="Hide from People & Pets" @mousedown.stop @click="toggleHidden(s, $event)">
               <EyeOffIcon :size="13" />
             </button>
           </div>
@@ -247,12 +404,24 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
           Pets
         </h2>
         <div class="pap-grid">
-          <div v-for="s in pets" :key="s.id" class="pap-card">
-            <NuxtLink :to="subjectHref(s)" class="pap-thumb-link">
+          <div
+            v-for="s in pets"
+            :key="s.id"
+            class="pap-card"
+            :class="{
+              'is-drag-source': isDragging && dragSubject?.id === s.id,
+              'is-drag-over':   dragOverId === s.id,
+            }"
+            :data-subject-id="s.id"
+          >
+            <div
+              class="pap-thumb-link"
+              @mousedown.left.stop="onThumbMousedown(s, $event)"
+            >
               <div class="pap-thumb" :style="faceStyle(s)">
                 <PawPrintIcon v-if="!s.thumbnailUrl" :size="28" class="pap-thumb-placeholder" />
               </div>
-            </NuxtLink>
+            </div>
 
             <div class="pap-card-body">
               <template v-if="editingId === s.id">
@@ -276,7 +445,7 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
               </template>
 
               <template v-else>
-                <button class="pap-name-btn" title="Rename" @click="startRename(s, $event)">
+                <button class="pap-name-btn" title="Rename" @mousedown.stop @click="startRename(s, $event)">
                   <PencilIcon :size="10" class="pap-name-edit-icon" />
                   {{ s.name ?? 'Unknown pet' }}
                 </button>
@@ -285,7 +454,7 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
               <span class="pap-count">{{ s.photoCount }} {{ s.photoCount === 1 ? 'photo' : 'photos' }}</span>
             </div>
 
-            <button class="pap-hide-btn" title="Hide" @click="toggleHidden(s, $event)">
+            <button class="pap-hide-btn" title="Hide" @mousedown.stop @click="toggleHidden(s, $event)">
               <EyeOffIcon :size="13" />
             </button>
           </div>
@@ -304,8 +473,13 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
         </button>
 
         <div v-if="hiddenOpen" class="pap-grid pap-grid-hidden">
-          <div v-for="s in hidden" :key="s.id" class="pap-card pap-card-hidden">
-            <NuxtLink :to="subjectHref(s)" class="pap-thumb-link">
+          <div
+            v-for="s in hidden"
+            :key="s.id"
+            class="pap-card pap-card-hidden"
+            :data-subject-id="s.id"
+          >
+            <div class="pap-thumb-link" @mousedown.left.stop="onThumbMousedown(s, $event)">
               <div class="pap-thumb" :style="faceStyle(s)">
                 <component
                   :is="s.type === 'person' ? UserIcon : PawPrintIcon"
@@ -314,7 +488,7 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
                   class="pap-thumb-placeholder"
                 />
               </div>
-            </NuxtLink>
+            </div>
 
             <div class="pap-card-body">
               <span class="pap-name-btn is-unnamed">
@@ -336,19 +510,64 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
     <Teleport to="body">
       <div v-if="mergeTarget" class="pap-merge-backdrop" @click.self="closeMerge">
         <div class="pap-merge-dialog" role="dialog" aria-modal="true">
-          <h3 class="pap-merge-title">Combine?</h3>
+          <h3 class="pap-merge-title">
+            {{ mergeContext === 'rename' ? 'Same person?' : 'Combine collections?' }}
+          </h3>
+
+          <!-- Face thumbnail pair -->
+          <div class="pap-merge-faces">
+            <div class="pap-merge-face">
+              <div
+                class="pap-merge-thumb"
+                :style="mergeSourceSubject?.thumbnailUrl
+                  ? { backgroundImage: `url(${mergeSourceSubject.thumbnailUrl})`, backgroundSize: '100%', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' }
+                  : {}"
+              >
+                <UserIcon v-if="!mergeSourceSubject?.thumbnailUrl" :size="20" />
+              </div>
+              <span class="pap-merge-face-label">{{ mergeSourceSubject?.name ?? 'Unknown' }}</span>
+            </div>
+            <span class="pap-merge-arrow">→</span>
+            <div class="pap-merge-face">
+              <div
+                class="pap-merge-thumb"
+                :style="mergeTarget.thumbnailUrl
+                  ? { backgroundImage: `url(${mergeTarget.thumbnailUrl})`, backgroundSize: '100%', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' }
+                  : {}"
+              >
+                <UserIcon v-if="!mergeTarget.thumbnailUrl" :size="20" />
+              </div>
+              <span class="pap-merge-face-label">{{ mergeTarget.name }}</span>
+            </div>
+          </div>
+
           <p class="pap-merge-body">
-            <strong>{{ mergeTarget.name }}</strong> already exists.
-            Combine both into one entry named:
+            <template v-if="mergeContext === 'rename'">
+              <strong>{{ mergeTarget.name }}</strong> already exists. Are these the same person?
+              Combining will move all photos into one collection.
+            </template>
+            <template v-else>
+              Move all photos from <strong>{{ mergeSourceSubject?.name ?? 'this collection' }}</strong>
+              into <strong>{{ mergeTarget.name }}</strong> and combine into one collection.
+            </template>
           </p>
+
+          <label class="pap-merge-name-label">Name for the combined collection</label>
           <input
             v-model="mergeName"
             class="pap-name-input pap-merge-input"
             :placeholder="mergeTarget.name"
           />
           <div class="pap-merge-actions">
-            <button class="pap-merge-btn pap-merge-btn-cancel" @click="closeMerge">Keep separate</button>
-            <button class="pap-merge-btn pap-merge-btn-confirm" @click="confirmMerge">Combine</button>
+            <button
+              class="pap-merge-btn pap-merge-btn-cancel"
+              @click="mergeContext === 'rename' ? keepSeparate() : closeMerge()"
+            >
+              {{ mergeContext === 'rename' ? 'Keep separate' : 'Cancel' }}
+            </button>
+            <button class="pap-merge-btn pap-merge-btn-confirm" @click="confirmMerge">
+              {{ mergeContext === 'rename' ? 'Yes, combine' : 'Combine' }}
+            </button>
           </div>
         </div>
       </div>
@@ -648,4 +867,87 @@ function faceStyle(s: SubjectSummary): Record<string, string> {
 }
 
 .pap-merge-btn-confirm:hover { opacity: 0.88; }
+
+/* ── Merge dialog — face thumbnails ────────────────────────────────────────── */
+.pap-merge-faces {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.pap-merge-face {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+
+.pap-merge-thumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--color-surface-raised);
+  border: 2px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.pap-merge-face-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.pap-merge-arrow {
+  font-size: 18px;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.pap-merge-name-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+
+/* ── Drag-to-merge ─────────────────────────────────────────────────────────── */
+.pap-card.is-drag-source { opacity: 0.35; }
+
+.pap-card.is-drag-over .pap-thumb {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+
+/* Ghost element is appended to body — must use :global */
+:global(.pap-drag-ghost) {
+  position: fixed;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background-color: var(--color-surface-raised, #eee);
+  background-size: 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+  border: 3px solid var(--color-accent, #6366f1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  opacity: 0.9;
+  pointer-events: none;
+  z-index: 9999;
+  cursor: grabbing;
+  transform: scale(1.08);
+}
 </style>

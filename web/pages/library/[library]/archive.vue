@@ -26,7 +26,7 @@ interface ArchiveApiItem {
 }
 
 const { data, pending, error, refresh } = await useFetch<{ items: ArchiveApiItem[] }>(
-  () => `/api/v1/archive?library=${libraryId.value}`,
+  () => `/api/v1/library/${libraryId.value}/archive`,
 )
 
 const { selectedIds, exitSelectionMode } = useGallery()

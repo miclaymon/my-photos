@@ -17,13 +17,25 @@ const { duplicateConflicts, conflictResolveOpen, resolveConflictsAndUpload, dism
 // Local mutable copy of resolutions — synced back on confirm
 const localResolutions = ref<Map<string, DuplicateResolution>>(new Map())
 
+// Blob URL previews for the incoming (new) files — created from the File object
+const newFilePreviews = ref<Map<string, string>>(new Map())
+
 watch(conflictResolveOpen, (open) => {
   if (open) {
-    const m = new Map<string, DuplicateResolution>()
+    const resolutions = new Map<string, DuplicateResolution>()
+    const previews    = new Map<string, string>()
     for (const c of duplicateConflicts.value) {
-      m.set(c.uploadFile.id, 'keep')
+      resolutions.set(c.uploadFile.id, 'keep')
+      if (c.uploadFile.file.type.startsWith('image/')) {
+        previews.set(c.uploadFile.id, URL.createObjectURL(c.uploadFile.file))
+      }
     }
-    localResolutions.value = m
+    localResolutions.value = resolutions
+    newFilePreviews.value  = previews
+  } else {
+    // Revoke all blob URLs to free memory
+    for (const url of newFilePreviews.value.values()) URL.revokeObjectURL(url)
+    newFilePreviews.value = new Map()
   }
 })
 
@@ -89,8 +101,13 @@ async function confirm() {
                 <div class="conflict-arrow">→</div>
 
                 <div class="conflict-thumb-wrap">
-                  <!-- New file — no preview available (binary never passes through server) -->
-                  <div class="conflict-thumb conflict-thumb-placeholder conflict-thumb-new" />
+                  <img
+                    v-if="newFilePreviews.get(conflict.uploadFile.id)"
+                    :src="newFilePreviews.get(conflict.uploadFile.id)"
+                    class="conflict-thumb conflict-thumb-new"
+                    alt="New file"
+                  />
+                  <div v-else class="conflict-thumb conflict-thumb-placeholder conflict-thumb-new" />
                   <span class="conflict-thumb-label">New</span>
                 </div>
               </div>

@@ -182,60 +182,65 @@ async function loadLibraryMedia(libraryId: string) {
 
   try {
     const data = await $fetch<{ items: Array<{
-      id:               string
-      originalFilename: string
-      contentType:      string
-      width:            number
-      height:           number
-      aspectRatio:      number
-      takenAt:          string
-      isVideo:          boolean
-      durationSeconds?: number
-      src:              string
-      thumbnailSrc?:    string
-      previewSrc?:      string
+      id:                string
+      original_filename: string
+      content_type:      string
+      width:             number
+      height:            number
+      aspect_ratio:      number
+      taken_at:          string
+      is_video:          boolean
+      duration_seconds?: number
+      // src is omitted for images (null) — only present for videos without a thumbnail.
+      // The lightbox fetches the full-res URL lazily via GET /api/v1/media/{id}.
+      src?:              string | null
+      thumbnail_src?:    string | null
+      // preview_src is always null in the list; loaded on demand.
+      preview_src?:      string | null
     }> }>(`/api/v1/library/${libraryId}/media`)
 
     if (fetchingFor.value !== libraryId) return   // library changed while fetching
 
-    // Preserve existing presigned src URLs to prevent image-flicker on re-fetch.
-    // Presigned GET URLs are stable for 1 hour; reusing them avoids the browser
+    // Preserve existing presigned thumbnail URLs to prevent flicker on re-fetch.
+    // Presigned GET URLs are valid for 1 hour; reusing them avoids the browser
     // treating a new URL as a different resource and re-downloading the image.
     const prevById = new Map(realItems.value.map(i => [i.id, i]))
 
     const nextReal = data.items.map(item => {
-      const prev = prevById.get(item.id)
+      const prev    = prevById.get(item.id)
+      const blobUrl = _blobUrls.get(item.id)
+
+      // If the server now has a real thumbnail, revoke the provisional blob URL
+      if (item.thumbnail_src && blobUrl) {
+        URL.revokeObjectURL(blobUrl)
+        _blobUrls.delete(item.id)
+      }
+
       return {
         id:               item.id,
-        originalFilename: item.originalFilename,
-        aspectRatio:      item.aspectRatio,
+        originalFilename: item.original_filename,
+        aspectRatio:      item.aspect_ratio,
         width:            item.width,
         height:           item.height,
-        takenAt:          item.takenAt,
-        isVideo:          item.isVideo,
-        duration:         item.durationSeconds
-                            ? formatDuration(Math.round(item.durationSeconds)) : undefined,
-        // Preserve existing presigned URLs to avoid image flicker on re-fetch
-        src:              prev?.src          ?? item.src,
-        thumbnailSrc:     prev?.thumbnailSrc ?? item.thumbnailSrc,
-        previewSrc:       prev?.previewSrc   ?? item.previewSrc,
+        takenAt:          item.taken_at,
+        isVideo:          item.is_video,
+        duration:         item.duration_seconds
+                            ? formatDuration(Math.round(item.duration_seconds)) : undefined,
+        // Prefer server-provided URLs; fall back to the provisional blob URL so
+        // newly-uploaded items remain visible while the background thumbnail job runs.
+        src:          prev?.src          ?? item.src          ?? blobUrl ?? undefined,
+        thumbnailSrc: prev?.thumbnailSrc ?? item.thumbnail_src ?? undefined,
+        previewSrc:   prev?.previewSrc   ?? item.preview_src  ?? undefined,
       }
     })
 
     realItems.value       = nextReal
     loadedLibraryId.value = libraryId
 
-    // Drop provisional items now represented by real items
+    // Drop provisional items now represented by real items.
+    // Blob URL lifecycle is managed in the nextReal loop above.
     const realIds = new Set(nextReal.map(i => i.id))
-    provisionalItems.value = provisionalItems.value.filter(p => {
-      if (realIds.has(p.id)) {
-        // Revoke the blob URL to free memory
-        const blobUrl = _blobUrls.get(p.id)
-        if (blobUrl) { URL.revokeObjectURL(blobUrl); _blobUrls.delete(p.id) }
-        return false
-      }
-      return true
-    })
+    provisionalItems.value = provisionalItems.value.filter(p => !realIds.has(p.id))
   } catch {
     // Fail silently — mock data still shows
     if (fetchingFor.value === libraryId) realItems.value = []

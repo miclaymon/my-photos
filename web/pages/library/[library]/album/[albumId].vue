@@ -47,11 +47,48 @@ const album     = ref<AlbumDetail | null>(null)
 const loading   = ref(true)
 const loadError = ref<string | null>(null)
 
+function mapAlbumItem(raw: Record<string, unknown>): AlbumItem {
+  const contentType = (raw.content_type as string) ?? ''
+  return {
+    id:               raw.id               as number,
+    mediaId:          raw.media_id         as string,
+    sortOrder:        raw.sort_order       as number,
+    caption:          raw.caption          as string | null,
+    originalFilename: raw.original_filename as string,
+    contentType,
+    width:            (raw.width           as number) ?? 0,
+    height:           (raw.height          as number) ?? 0,
+    aspectRatio:      (raw.aspect_ratio    as number) ?? 1,
+    isVideo:          contentType.startsWith('video/'),
+    durationSeconds:  raw.duration_seconds as number | undefined,
+    takenAt:          raw.taken_at         as string,
+    src:              raw.image_url        as string | null,
+    thumbnailSrc:     raw.thumbnail_url    as string | null,
+    previewSrc:       null,
+  }
+}
+
+function mapAlbumDetail(raw: Record<string, unknown>): AlbumDetail {
+  return {
+    id:        raw.id         as string,
+    name:      raw.name       as string,
+    libraryId: raw.library_id as string,
+    ownerId:   raw.owner_id   as number,
+    coverId:   raw.cover_id   as string | null,
+    coverUrl:  raw.cover_url  as string | null,
+    canEdit:   (raw.can_edit  as boolean) ?? false,
+    createdAt: raw.created_at as string,
+    updatedAt: raw.updated_at as string,
+    items:     ((raw.items ?? []) as Record<string, unknown>[]).map(mapAlbumItem),
+  }
+}
+
 async function loadAlbum() {
   loading.value   = true
   loadError.value = null
   try {
-    album.value = await $fetch<AlbumDetail>(`/api/v1/albums/${albumId.value}`)
+    const raw    = await $fetch<Record<string, unknown>>(`/api/v1/albums/${albumId.value}`)
+    album.value  = mapAlbumDetail(raw)
     // Initialise local items copy for drag-and-drop
     localItems.value = [...(album.value?.items ?? [])]
   } catch {
@@ -156,7 +193,7 @@ async function removeItem(item: AlbumItem) {
 async function setCover(item: AlbumItem) {
   await $fetch(`/api/v1/albums/${albumId.value}`, {
     method: 'PATCH',
-    body:   { coverId: item.mediaId },
+    body:   { cover_id: item.mediaId },
   }).catch(() => {})
   await loadAlbum()
 }

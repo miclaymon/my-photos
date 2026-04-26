@@ -51,12 +51,6 @@ export default defineNuxtConfig({
     session: {
       maxAge: 60 * 60 * 24 * 7,
     },
-    storageEndpoint: '',
-    storageAccessKeyId: '',
-    storageSecretAccessKey: '',
-    storageBucketName: 'photos',
-    storageRegion: 'us-east-1',
-    storageMaxVersions: 3,
   },
 
   // Register all components by filename only, regardless of subdirectory
@@ -76,12 +70,4 @@ export default defineNuxtConfig({
     typeCheck: false,
   },
 
-  // Prevent Nitro/Rollup from trying to bundle native Node.js addons (.node files).
-  // @tensorflow/tfjs-node and face-api.js both rely on native bindings that must
-  // be required at runtime by Node — they cannot be inlined into a Rollup bundle.
-  nitro: {
-    rollupConfig: {
-      external: [/\.node$/, '@tensorflow/tfjs-node'],
-    },
-  },
 })

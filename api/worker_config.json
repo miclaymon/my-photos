@@ -1,0 +1,78 @@
+{
+  "_comment": "Backend worker configuration. Edit via the admin UI or directly. See AGENTS.md for valid options.",
+  "runner": {
+    "_comment": "Global job runner settings.",
+    "torch_cpu_threads": 2,
+    "sleep_after_job_seconds": 1
+  },
+  "object_detection": {
+    "provider": "onnxruntime",
+    "_provider_options": [
+      "onnxruntime",
+      "ultralytics",
+      "disabled"
+    ],
+    "model": "yolov8n",
+    "confidence_threshold": 0.35,
+    "nms_iou_threshold": 0.45,
+    "pet_confidence_threshold": 0.65,
+    "video_frames": 8
+  },
+  "face_detection": {
+    "provider": "insightface",
+    "_provider_options": [
+      "insightface",
+      "face_recognition",
+      "disabled"
+    ],
+    "_threshold_note": "Thresholds are L2 distances between L2-normalised face embeddings. insightface ArcFace (512-d): auto_confirm≈0.50, review≈0.90, cluster≈1.10. face_recognition dlib (128-d): auto_confirm≈0.30, review≈0.45, cluster≈0.60.",
+    "auto_confirm_threshold": 0.50,
+    "review_threshold": 0.90,
+    "cluster_threshold": 1.10,
+    "min_gap": 0.08
+  },
+  "ocr": {
+    "provider": "easyocr",
+    "_provider_options": [
+      "easyocr",
+      "pytesseract",
+      "surya",
+      "disabled"
+    ],
+    "language": "en"
+  },
+  "geocoding": {
+    "provider": "nominatim",
+    "_provider_options": [
+      "reverse_geocoder",
+      "nominatim",
+      "disabled"
+    ],
+    "nominatim_fallback": true,
+    "nominatim_rate_limit_seconds": 1.0,
+    "nominatim_user_agent": "my-photos/1.0"
+  },
+  "barcode": {
+    "provider": "zxing-cpp",
+    "_provider_options": [
+      "zxing-cpp",
+      "pyzbar",
+      "opencv",
+      "disabled"
+    ]
+  },
+  "llm": {
+    "provider": "disabled",
+    "_provider_options": [
+      "disabled",
+      "ollama",
+      "lmstudio",
+      "openai",
+      "vertexai"
+    ],
+    "_comment": "Optional multimodal LLM for enhanced tagging. Disabled by default.",
+    "model": null,
+    "endpoint": null,
+    "api_key": null
+  }
+}

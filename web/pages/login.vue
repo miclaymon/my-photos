@@ -1,7 +1,7 @@
 <script setup lang="ts">
 definePageMeta({ layout: false })
 
-const { loggedIn } = useUserSession()
+const { loggedIn, fetch: fetchSession } = useUserSession()
 if (loggedIn.value) await navigateTo('/')
 
 const email    = ref('')
@@ -17,6 +17,9 @@ async function submit() {
       method: 'POST',
       body: { email: email.value, password: password.value },
     })
+    // Sync the client-side session state before navigating — without this,
+    // loggedIn is still false and the auth middleware on '/' redirects back here.
+    await fetchSession()
     await navigateTo('/')
   } catch (e: unknown) {
     error.value = (e as { data?: { message?: string } })?.data?.message ?? 'Invalid credentials'

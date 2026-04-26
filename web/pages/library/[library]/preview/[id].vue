@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { XIcon, ChevronLeftIcon, ChevronRightIcon, InfoIcon, UserIcon, PawPrintIcon, TagIcon } from 'lucide-vue-next'
+import { XIcon, ChevronLeftIcon, ChevronRightIcon, InfoIcon, UserIcon, PawPrintIcon, TagIcon, ChevronDownIcon, BookmarkPlusIcon, BarcodeIcon, ExternalLinkIcon } from 'lucide-vue-next'
 import { useElementBounding, useLocalStorage } from '@vueuse/core'
 import type { MediaItem } from '~/composables/useGalleryData'
 
@@ -57,17 +57,25 @@ interface MediaDetail {
   locationLabel:    string | null
 }
 
-// Fetched when item is not in galleryItems (non-gallery contexts)
+// Fetched when the item is not in the gallery, or when it is but has no full-res
+// src (the gallery list endpoint intentionally omits src for images to reduce
+// initial load — we fetch it here on demand the first time the lightbox opens).
 const fetchedDetail = ref<MediaDetail | null>(null)
 const fetchLoading  = ref(false)
 const fetchError    = ref(false)
 
+function _needsFetch(): boolean {
+  if (!galleryItem.value) return true          // not in gallery at all
+  if (!galleryItem.value.src) return true      // in gallery but src stripped (images)
+  return false
+}
+
 async function fetchItem() {
-  if (galleryItem.value) return  // already resolved from gallery
+  if (!_needsFetch()) return
   fetchLoading.value = true
   fetchError.value   = false
   try {
-    fetchedDetail.value = await $fetch<MediaDetail>(`/api/v1/media/${id.value}`)
+    fetchedDetail.value = await _fetchMappedDetail(id.value)
   } catch {
     fetchError.value = true
   } finally {
@@ -75,32 +83,78 @@ async function fetchItem() {
   }
 }
 
-// Combined item used by the template — gallery or API-fetched
-const item = computed((): MediaItem | null => {
-  if (galleryItem.value) return galleryItem.value
-  if (!fetchedDetail.value) return null
-  const d = fetchedDetail.value
+/** Fetch /api/v1/media/:id and map the snake_case API response to MediaDetail. */
+async function _fetchMappedDetail(mediaId: string): Promise<MediaDetail> {
+  const r = await $fetch<{
+    id:                string
+    original_filename: string
+    content_type:      string
+    size:              number | null
+    width:             number | null
+    height:            number | null
+    aspect_ratio:      number | null
+    duration_seconds:  number | null
+    taken_at:          string | null
+    created_at:        string | null
+    image_url:         string | null
+    thumbnail_url:     string | null
+    exif_data:         Record<string, unknown> | null
+    location_label:    string | null
+  }>(`/api/v1/media/${mediaId}`)
   return {
-    id:               d.id,
-    aspectRatio:      d.aspectRatio,
-    width:            d.width  ?? 0,
-    height:           d.height ?? 0,
-    takenAt:          d.takenAt ?? '',
-    isVideo:          d.isVideo,
-    originalFilename: d.originalFilename,
-    src:              d.imageUrl     ?? undefined,
-    thumbnailSrc:     d.thumbnailUrl ?? undefined,
+    id:               r.id,
+    originalFilename: r.original_filename,
+    contentType:      r.content_type,
+    size:             r.size,
+    width:            r.width,
+    height:           r.height,
+    aspectRatio:      r.aspect_ratio ?? 1.5,
+    durationSeconds:  r.duration_seconds,
+    takenAt:          r.taken_at,
+    createdAt:        r.created_at,
+    isVideo:          r.content_type?.startsWith('video/') ?? false,
+    imageUrl:         r.image_url,
+    thumbnailUrl:     r.thumbnail_url,
+    exif:             r.exif_data,
+    locationLabel:    r.location_label,
   }
+}
+
+// Combined item: prefers fetchedDetail (has full URL) once available, but
+// surfaces galleryItem immediately so metadata/thumbnail are visible while the
+// full-res URL is being fetched.
+const item = computed((): MediaItem | null => {
+  // Once we have the fetched detail, use it (has image_url / full src)
+  if (fetchedDetail.value) {
+    const d = fetchedDetail.value
+    return {
+      id:               d.id,
+      aspectRatio:      d.aspectRatio,
+      width:            d.width  ?? 0,
+      height:           d.height ?? 0,
+      takenAt:          d.takenAt ?? '',
+      isVideo:          d.isVideo,
+      originalFilename: d.originalFilename,
+      src:              d.imageUrl     ?? undefined,
+      thumbnailSrc:     d.thumbnailUrl ?? undefined,
+    }
+  }
+  // Fallback: use gallery item while the detail is loading (shows thumbnail)
+  if (galleryItem.value) return galleryItem.value
+  return null
 })
 
-// Trigger fetch when id changes and item isn't in gallery
+// Trigger fetch on id change and whenever the gallery item changes
 watch(id, () => {
   fetchedDetail.value = null
-  if (!galleryItem.value) fetchItem()
+  fetchItem()
 }, { immediate: true })
 
-// Also watch galleryItem — if it becomes available after initial render, clear the fetched version
-watch(galleryItem, (v) => { if (v) fetchedDetail.value = null })
+// If the gallery item arrives late (e.g. gallery loads after direct navigation),
+// re-evaluate whether we still need the detail fetch
+watch(galleryItem, () => {
+  if (_needsFetch() && !fetchedDetail.value && !fetchLoading.value) fetchItem()
+})
 
 // ── Image sizing ──────────────────────────────────────────────────────────────
 const previewSize = computed(() => {
@@ -142,12 +196,15 @@ watch(id, () => {
   fullLoaded.value            = false
   mediaSubjects.value         = []
   mediaObjectDetections.value = []
+  mediaBarcodes.value         = []
   mediaTags_.value            = []
+  mediaAlbums.value           = []
   tagInput.value              = ''
   fetchedDetail.value         = null
   if (infoOpen.value) {
     loadInfo()
     loadMediaTags()
+    loadMediaAlbums()
   }
 })
 
@@ -200,15 +257,27 @@ function onImgMouseLeave() {
 async function loadSubjects() {
   if (!item.value || item.value.isVideo) { mediaSubjects.value = []; return }
   try {
-    const data = await $fetch<{ subjects: MediaSubject[] }>(`/api/v1/media/${id.value}/subjects`)
-    mediaSubjects.value = data.subjects
+    const data = await $fetch<{ subjects: Array<{
+      subject_id:    string
+      name:          string | null
+      type:          'person' | 'pet'
+      thumbnail_url: string | null
+      bounding_box:  { x: number; y: number; w: number; h: number }
+    }> }>(`/api/v1/media/${id.value}/subjects`)
+    mediaSubjects.value = data.subjects.map(s => ({
+      subjectId:    s.subject_id,
+      name:         s.name,
+      type:         s.type,
+      thumbnailUrl: s.thumbnail_url,
+      boundingBox:  s.bounding_box,
+    }))
   } catch {
     mediaSubjects.value = []
   }
 }
 
-// Load subjects once the full-res image has loaded
-watch(fullLoaded, (loaded) => { if (loaded) loadSubjects() })
+// Load subjects + barcodes once the full-res image has loaded
+watch(fullLoaded, (loaded) => { if (loaded) { loadSubjects(); loadBarcodes() } })
 
 // ── Face chip interactions ────────────────────────────────────────────────────
 
@@ -345,6 +414,78 @@ async function onTagEnter() {
   tagInputRef.value?.focus()
 }
 
+// ── Albums in info panel ──────────────────────────────────────────────────────
+interface AlbumRef { id: string; name: string; libraryId: string }
+
+const mediaAlbums       = ref<AlbumRef[]>([])
+const addToAlbumOpen_   = ref(false)
+
+async function loadMediaAlbums() {
+  try {
+    const data = await $fetch<{ albums: Array<{ id: string; name: string; library_id: string }> }>(
+      `/api/v1/media/${id.value}/albums`,
+    )
+    mediaAlbums.value = data.albums.map(a => ({ id: a.id, name: a.name, libraryId: a.library_id }))
+  } catch {
+    mediaAlbums.value = []
+  }
+}
+
+function handleAlbumAdded() {
+  addToAlbumOpen_.value = false
+  loadMediaAlbums()
+}
+
+// ── Barcodes ──────────────────────────────────────────────────────────────────
+interface BarcodeItem {
+  format: string
+  data: string
+  boundingBox: { x: number; y: number; w: number; h: number } | null
+}
+
+const mediaBarcodes = ref<BarcodeItem[]>([])
+const externalLinkTarget   = ref<string | null>(null)
+const suppressExternalWarn = useLocalStorage('suppress-external-link-warning', false)
+
+function isUrl(str: string): boolean {
+  try { const u = new URL(str); return u.protocol === 'http:' || u.protocol === 'https:' }
+  catch { return false }
+}
+function faviconUrl(url: string): string {
+  try { return `https://www.google.com/s2/favicons?domain=${new URL(url).hostname}&sz=16` }
+  catch { return '' }
+}
+function handleBarcodeClick(data: string) {
+  if (!isUrl(data)) return
+  if (suppressExternalWarn.value) { window.open(data, '_blank', 'noopener,noreferrer'); return }
+  externalLinkTarget.value = data
+}
+function confirmExternalLink() {
+  if (externalLinkTarget.value) window.open(externalLinkTarget.value, '_blank', 'noopener,noreferrer')
+  externalLinkTarget.value = null
+}
+
+async function loadBarcodes() {
+  if (!item.value || item.value.isVideo) { mediaBarcodes.value = []; return }
+  try {
+    const data = await $fetch<{ barcodes: Array<{
+      format: string
+      data: string
+      bounding_box: { x: number; y: number; w: number; h: number } | null
+    }> }>(`/api/v1/media/${id.value}/barcodes`)
+    mediaBarcodes.value = data.barcodes.map(b => ({
+      format: b.format,
+      data: b.data,
+      boundingBox: b.bounding_box ?? null,
+    }))
+  } catch {
+    mediaBarcodes.value = []
+  }
+}
+
+// ── EXIF Advanced section ─────────────────────────────────────────────────────
+const exifExpanded = useLocalStorage('preview-exif-expanded', false)
+
 // ── Object detection overlay (admin setting) ──────────────────────────────────
 interface MediaObjectDetection {
   id:         number
@@ -355,7 +496,7 @@ interface MediaObjectDetection {
 
 const showObjectBoxes   = useLocalStorage('preview-show-object-boxes', false)
 const { user }          = useUserSession()
-const isAdmin           = computed(() => (user.value as { id?: number } | null)?.id === 1)
+const isAdmin           = computed(() => !!(user.value as { isAdmin?: boolean } | null)?.isAdmin)
 const objectBoxesActive = computed(() => isAdmin.value && showObjectBoxes.value)
 
 const mediaObjectDetections = ref<MediaObjectDetection[]>([])
@@ -366,8 +507,18 @@ async function loadObjects() {
     return
   }
   try {
-    const data = await $fetch<{ objects: MediaObjectDetection[] }>(`/api/v1/media/${id.value}/objects`)
-    mediaObjectDetections.value = data.objects
+    const data = await $fetch<{ objects: Array<{
+      id:           number
+      class_name:   string
+      confidence:   number
+      bounding_box: { x: number; y: number; w: number; h: number }
+    }> }>(`/api/v1/media/${id.value}/objects`)
+    mediaObjectDetections.value = data.objects.map(o => ({
+      id:          o.id,
+      class:       o.class_name,
+      confidence:  o.confidence,
+      boundingBox: o.bounding_box,
+    }))
   } catch {
     mediaObjectDetections.value = []
   }
@@ -401,11 +552,13 @@ onMounted(() => {
 })
 
 // Update face-box positions after the panel's CSS transition settles (0.22s)
-// Also load tags when the panel first opens.
+// Also load tags and albums when the panel first opens.
 watch(infoOpen, (open) => {
   setTimeout(() => imgBounds.update(), 250)
   if (open) {
     loadMediaTags()
+    loadMediaAlbums()
+    if (!mediaBarcodes.value.length) loadBarcodes()
     if (!libraryTags_.value.length) loadLibraryTags()
   }
 })
@@ -418,7 +571,7 @@ async function loadInfo() {
     if (fetchedDetail.value) {
       infoDetail.value = fetchedDetail.value
     } else {
-      infoDetail.value = await $fetch<MediaDetail>(`/api/v1/media/${id.value}`)
+      infoDetail.value = await _fetchMappedDetail(id.value)
     }
   } finally {
     infoLoading.value = false
@@ -430,12 +583,14 @@ function toggleInfo() {
   if (infoOpen.value && !infoDetail.value) loadInfo()
 }
 
-// Restore tags on remount if panel was already open
+// Restore tags, albums, and barcodes on remount if panel was already open
 onMounted(() => {
   nextTick(() => {
     if (_persistedInfoOpen.value) {
       loadMediaTags()
       loadLibraryTags()
+      loadMediaAlbums()
+      loadBarcodes()
     }
   })
 })
@@ -517,8 +672,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 
         <!-- ── VIDEO ──────────────────────────────────────────────────── -->
         <template v-if="item.isVideo">
+          <!-- Wait until the full src is available (fetched on demand for videos
+               with server thumbnails — src is omitted from the gallery list). -->
           <video
-            :key="item.id"
+            v-if="mediaSrc"
+            :key="item.id + '-' + mediaSrc"
             :src="mediaSrc"
             class="preview-video"
             :width="previewSize.w"
@@ -529,10 +687,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
             style="view-transition-name: photo-preview"
             @click.stop
           />
+          <div v-else class="preview-video-loading" :style="{ width: previewSize.w + 'px', height: previewSize.h + 'px' }" />
         </template>
 
         <!-- ── IMAGE ──────────────────────────────────────────────────── -->
         <template v-else>
+          <!-- Thumbnail shown immediately (from gallery data or fetched detail) -->
           <img
             :src="thumbSrc"
             :alt="item.originalFilename"
@@ -543,9 +703,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
             :style="!fullLoaded ? { viewTransitionName: 'photo-preview' } : {}"
             draggable="false"
           />
+          <!-- Full-res image: only rendered once the URL is available.
+               mediaSrc is empty while the detail fetch is in-flight; rendering
+               an <img src=""> would fire a spurious request to the current page. -->
           <img
+            v-if="mediaSrc"
             ref="fullImgRef"
-            :key="item.id"
+            :key="item.id + '-' + mediaSrc"
             :src="mediaSrc"
             :alt="item.originalFilename"
             class="preview-img"
@@ -719,18 +883,83 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
           </div>
         </div>
 
-        <div v-if="infoDetail?.exif && Object.keys(infoDetail.exif).length" class="info-section">
-          <h3 class="info-heading">{{ item.isVideo ? 'Metadata' : 'EXIF' }}</h3>
-          <dl class="info-dl">
-            <div
-              v-for="(val, key) in infoDetail.exif"
-              :key="key"
-              class="info-row"
+        <!-- ── Albums ────────────────────────────────────────────── -->
+        <div class="info-section">
+          <div class="info-heading-row">
+            <h3 class="info-heading">Albums</h3>
+            <button class="info-add-btn" title="Add to album" @click.stop="addToAlbumOpen_ = true">
+              <BookmarkPlusIcon :size="12" />
+            </button>
+          </div>
+          <div v-if="mediaAlbums.length" class="info-albums">
+            <NuxtLink
+              v-for="album in mediaAlbums"
+              :key="album.id"
+              class="info-album-chip"
+              :to="`/library/${album.libraryId}/album/${album.id}`"
+              @click.stop
             >
-              <dt>{{ key }}</dt>
-              <dd>{{ val }}</dd>
-            </div>
-          </dl>
+              {{ album.name }}
+            </NuxtLink>
+          </div>
+          <p v-else class="info-albums-empty">Not in any albums</p>
+        </div>
+
+        <!-- ── Barcodes ──────────────────────────────────────────── -->
+        <div v-if="mediaBarcodes.length" class="info-section">
+          <h3 class="info-heading">Barcodes</h3>
+          <div class="info-subjects">
+            <template v-for="bc in mediaBarcodes" :key="bc.format + ':' + bc.data">
+              <component
+                :is="isUrl(bc.data) ? 'button' : 'div'"
+                class="info-subject-chip"
+                :class="{ 'info-barcode-link': isUrl(bc.data) }"
+                @click.stop="handleBarcodeClick(bc.data)"
+              >
+                <div class="info-subject-avatar">
+                  <img
+                    v-if="isUrl(bc.data)"
+                    :src="faviconUrl(bc.data)"
+                    class="info-barcode-favicon"
+                    alt=""
+                  />
+                  <BarcodeIcon v-else :size="14" class="info-subject-avatar-icon" />
+                </div>
+                <span class="info-subject-name info-barcode-value">{{ bc.data }}</span>
+                <ExternalLinkIcon v-if="isUrl(bc.data)" :size="11" class="info-barcode-ext-icon" />
+              </component>
+            </template>
+          </div>
+        </div>
+
+        <!-- ── Advanced (EXIF / Metadata) ───────────────────────── -->
+        <div v-if="infoDetail?.exif && Object.keys(infoDetail.exif).length" class="info-section info-advanced-section">
+          <button
+            class="info-advanced-toggle"
+            :aria-expanded="exifExpanded"
+            @click.stop="exifExpanded = !exifExpanded"
+          >
+            <ChevronDownIcon
+              :size="13"
+              class="info-advanced-chevron"
+              :class="{ 'is-open': exifExpanded }"
+            />
+            <span class="info-heading">Advanced</span>
+          </button>
+          <div v-if="exifExpanded" class="info-advanced-body">
+            <p class="info-advanced-subsection">Metadata ({{ item.isVideo ? 'XMP / QuickTime' : 'EXIF' }})</p>
+            <table class="info-exif-table">
+              <tbody>
+                <tr
+                  v-for="(val, key) in infoDetail.exif"
+                  :key="key"
+                >
+                  <th>{{ key }}</th>
+                  <td>{{ Array.isArray(val) ? val.join(', ') : val }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
       </div>
@@ -748,6 +977,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
     <p>{{ fetchError ? 'Photo not found.' : 'Loading…' }}</p>
     <button @click="closePreview">Go back</button>
   </div>
+
+  <!-- ── Add-to-album modal ────────────────────────────────────────────────── -->
+  <AppAddToAlbumModal
+    :open="addToAlbumOpen_"
+    :media-ids="[id]"
+    @update:open="addToAlbumOpen_ = $event"
+    @added="handleAlbumAdded"
+  />
 
   <!-- ── Face / pet detection boxes ─────────────────────────────────────────
        Teleported to body so they layer above the fixed preview-page backdrop.
@@ -856,6 +1093,58 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
         >{{ obj.class }}</span>
       </div>
     </template>
+
+    <!-- ── Barcode hover boxes ──────────────────────────────────────────────── -->
+    <template v-if="showFaceBoxes && fullLoaded">
+      <div
+        v-for="(bc, i) in mediaBarcodes.filter(b => b.boundingBox)"
+        :key="'bc-' + i"
+        class="preview-barcode-box"
+        :style="{
+          left:   (imgBounds.left.value  + bc.boundingBox!.x * imgBounds.width.value)  + 'px',
+          top:    (imgBounds.top.value   + bc.boundingBox!.y * imgBounds.height.value) + 'px',
+          width:  (bc.boundingBox!.w     * imgBounds.width.value)  + 'px',
+          height: (bc.boundingBox!.h     * imgBounds.height.value) + 'px',
+        }"
+      >
+        <button
+          class="preview-barcode-chip"
+          :class="{ 'is-link': isUrl(bc.data) }"
+          @mouseenter="onImgMouseEnter"
+          @mouseleave="onImgMouseLeave"
+          @click.stop="handleBarcodeClick(bc.data)"
+        >
+          <img
+            v-if="isUrl(bc.data)"
+            :src="faviconUrl(bc.data)"
+            class="preview-barcode-favicon"
+            alt=""
+          />
+          <BarcodeIcon v-else :size="12" class="preview-barcode-icon" />
+          <span class="preview-barcode-value">{{ bc.data }}</span>
+          <ExternalLinkIcon v-if="isUrl(bc.data)" :size="10" class="preview-barcode-ext" />
+        </button>
+      </div>
+    </template>
+
+    <!-- ── External link warning modal ─────────────────────────────────────── -->
+    <Transition name="modal">
+      <div v-if="externalLinkTarget" class="name-modal-backdrop" @click.self="externalLinkTarget = null">
+        <div class="name-modal ext-link-modal" role="dialog" aria-modal="true" aria-label="External link warning">
+          <ExternalLinkIcon :size="28" class="ext-link-icon" />
+          <p class="name-modal-label">Opening External Link</p>
+          <p class="ext-link-url">{{ externalLinkTarget }}</p>
+          <label class="ext-link-suppress">
+            <input type="checkbox" v-model="suppressExternalWarn" />
+            Don't show this again
+          </label>
+          <div class="name-modal-actions">
+            <button class="name-modal-cancel" @click="externalLinkTarget = null">Cancel</button>
+            <button class="name-modal-save" @click="confirmExternalLink">Open</button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </Teleport>
 </template>
 
@@ -929,6 +1218,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   position: absolute;
   outline: none;
   background: #000;
+}
+
+.preview-video-loading {
+  border-radius: 3px;
+  background: #111;
+  max-width: 100%;
+  max-height: 100%;
 }
 
 .preview-nav {
@@ -1341,6 +1637,262 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 /* Fade transition (reuses the modal Transition name) */
 .modal-enter-active, .modal-leave-active { transition: opacity 0.15s ease; }
 .modal-enter-from, .modal-leave-to       { opacity: 0; }
+
+/* ── Barcode hover boxes (Teleported, position: fixed) ──────────────────── */
+
+.preview-barcode-box {
+  position: fixed;
+  border: 2px solid rgba(251, 191, 36, 0.8);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 350;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.preview-barcode-chip {
+  position: absolute;
+  bottom: -1px;
+  left: 50%;
+  transform: translate(-50%, 100%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 20px;
+  padding: 3px 10px 3px 6px;
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: default;
+  max-width: 220px;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.preview-barcode-chip.is-link { cursor: pointer; }
+.preview-barcode-chip.is-link:hover {
+  background: rgba(30, 30, 30, 0.9);
+  border-color: rgba(251, 191, 36, 0.6);
+}
+
+.preview-barcode-favicon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.preview-barcode-icon { color: rgba(251, 191, 36, 0.8); flex-shrink: 0; }
+
+.preview-barcode-value {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.88);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'Geist Mono', monospace;
+}
+
+.preview-barcode-ext {
+  color: rgba(255, 255, 255, 0.4);
+  flex-shrink: 0;
+}
+
+/* ── External link warning modal ────────────────────────────────────────── */
+
+.ext-link-modal {
+  gap: 12px;
+}
+
+.ext-link-icon {
+  color: #f59e0b;
+}
+
+.ext-link-url {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  margin: 0;
+  font-family: 'Geist Mono', monospace;
+  word-break: break-all;
+  text-align: center;
+  max-width: 100%;
+}
+
+.ext-link-suppress {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  user-select: none;
+}
+
+.ext-link-suppress input[type="checkbox"] {
+  accent-color: rgba(255, 255, 255, 0.7);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+/* ── Info heading row (heading + action button) ─────────────────────────── */
+
+.info-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.info-heading-row .info-heading { margin-bottom: 0; }
+
+.info-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+  flex-shrink: 0;
+}
+
+.info-add-btn:hover { color: rgba(255, 255, 255, 0.8); background: rgba(255, 255, 255, 0.08); }
+
+/* ── Albums in info panel ────────────────────────────────────────────────── */
+
+.info-albums {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.info-album-chip {
+  display: block;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.06);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.12s, color 0.12s;
+}
+
+.info-album-chip:hover { background: rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.92); }
+
+.info-albums-empty {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.28);
+  margin: 0;
+}
+
+/* ── Barcode rows in info panel ─────────────────────────────────────────── */
+
+.info-barcode-link {
+  border: none;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+}
+
+.info-barcode-value {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Geist Mono', monospace;
+  font-size: 11px !important;
+}
+
+.info-barcode-favicon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  border-radius: 3px;
+}
+
+.info-barcode-ext-icon {
+  color: rgba(255, 255, 255, 0.3);
+  flex-shrink: 0;
+}
+
+/* ── Advanced (EXIF) collapsible ─────────────────────────────────────────── */
+
+.info-advanced-section { padding-bottom: 0; }
+
+.info-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0 0 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.info-advanced-chevron {
+  color: rgba(255, 255, 255, 0.3);
+  flex-shrink: 0;
+  transition: transform 0.18s ease;
+}
+
+.info-advanced-chevron.is-open { transform: rotate(180deg); }
+
+.info-advanced-body {
+  padding-bottom: 12px;
+}
+
+.info-advanced-subsection {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.22);
+  margin: 0 0 8px;
+}
+
+.info-exif-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-bottom: 12px;
+}
+
+.info-exif-table th,
+.info-exif-table td {
+  padding: 3px 0;
+  vertical-align: top;
+  line-height: 1.4;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.info-exif-table th {
+  width: 42%;
+  padding-right: 8px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.35);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0;
+}
+
+.info-exif-table td {
+  color: rgba(255, 255, 255, 0.72);
+  word-break: break-all;
+}
 
 /* ── Tags section in info panel ─────────────────────────────────────────── */
 

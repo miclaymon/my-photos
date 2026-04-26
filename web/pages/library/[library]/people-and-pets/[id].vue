@@ -24,9 +24,12 @@ interface MediaItem {
   reviewNeeded:     boolean
   boundingBox:      { x: number; y: number; w: number; h: number } | null
   thumbnailUrl:     string | null
+  faceCropUrl:      string | null
   imageUrl:         string | null
   originalFilename: string
   takenAt:          string | null
+  width:            number | null
+  height:           number | null
 }
 
 interface SubjectDetail {
@@ -36,14 +39,44 @@ interface SubjectDetail {
   hidden: boolean
 }
 
-interface SubjectMediaResponse {
-  subject: SubjectDetail
-  media:   MediaItem[]
+interface SubjectMediaRaw {
+  subject: { id: string; type: string; name: string | null; hidden: boolean }
+  media:   Array<Record<string, unknown>>
 }
 
-const { data, pending, refresh } = await useFetch<SubjectMediaResponse>(
+function mapMediaItem(raw: Record<string, unknown>): MediaItem {
+  return {
+    detectionId:      raw.detection_id      as number | null,
+    mediaId:          raw.media_id          as string,
+    confidence:       raw.confidence        as number,
+    matchDistance:    raw.match_distance    as number | null,
+    reviewNeeded:     raw.review_needed     as boolean,
+    boundingBox:      raw.bounding_box      as { x: number; y: number; w: number; h: number } | null,
+    thumbnailUrl:     raw.thumbnail_url     as string | null,
+    faceCropUrl:      raw.face_crop_url     as string | null,
+    imageUrl:         raw.image_url         as string | null,
+    originalFilename: raw.original_filename as string,
+    takenAt:          raw.taken_at          as string | null,
+    width:            raw.width             as number | null,
+    height:           raw.height            as number | null,
+  }
+}
+
+const { data: rawData, pending, refresh: rawRefresh } = await useFetch<SubjectMediaRaw>(
   () => `/api/v1/library/${libraryId.value}/subjects/${subjectId.value}/media`,
 )
+
+const data = computed(() => {
+  if (!rawData.value) return null
+  return {
+    subject: rawData.value.subject as SubjectDetail,
+    media:   (rawData.value.media ?? []).map(mapMediaItem),
+  }
+})
+
+async function refresh() {
+  await rawRefresh()
+}
 
 const subject        = computed(() => data.value?.subject ?? null)
 const allMedia       = computed(() => data.value?.media ?? [])
@@ -57,8 +90,9 @@ const confirmedItems = computed(() => allMedia.value.filter(m => !m.reviewNeeded
 const localCoverUrl = ref<string | null>(null)
 watch(subjectId, () => { localCoverUrl.value = null })
 
+// Header uses the face crop (not the full photo thumbnail) so we see the person's face
 const headerCoverUrl = computed(
-  () => localCoverUrl.value ?? allMedia.value[0]?.thumbnailUrl ?? null,
+  () => localCoverUrl.value ?? allMedia.value[0]?.faceCropUrl ?? allMedia.value[0]?.thumbnailUrl ?? null,
 )
 
 // ── Rename ────────────────────────────────────────────────────────────────────
@@ -120,17 +154,17 @@ async function confirmMerge() {
 // ── Hide / Unhide ─────────────────────────────────────────────────────────────
 
 async function toggleHidden() {
-  if (!subject.value || !data.value) return
+  if (!subject.value || !rawData.value) return
   const newHidden = !subject.value.hidden
-  // Optimistic update — avoids re-fetching presigned URLs for all images
-  data.value.subject.hidden = newHidden
+  // Optimistic update — mutate the raw data to avoid re-fetching all presigned URLs
+  rawData.value.subject.hidden = newHidden
   try {
     await $fetch(`/api/v1/subjects/${subject.value.id}`, {
       method: 'PATCH',
       body: { hidden: newHidden },
     })
   } catch {
-    if (data.value) data.value.subject.hidden = !newHidden
+    if (rawData.value) rawData.value.subject.hidden = !newHidden
   }
 }
 
@@ -162,8 +196,8 @@ async function setCover(item: MediaItem) {
   openMenuId.value = null
   if (!subject.value) return
 
-  // Optimistic update — show the new cover immediately
-  localCoverUrl.value = item.thumbnailUrl
+  // Optimistic update — show the face crop for the header (falls back to photo thumbnail)
+  localCoverUrl.value = item.faceCropUrl ?? item.thumbnailUrl
 
   if (item.detectionId) {
     // Person: set via detection endpoint → updates representativeDetectionId
@@ -284,35 +318,14 @@ const confirmedGalleryItems = computed<GalleryItem[]>(() =>
 // ── Thumbnail crop CSS ────────────────────────────────────────────────────────
 // Fixed 140×140 container — pixel values are exact.
 
-const THUMB_PX = 140
 
 function thumbStyle(item: MediaItem): Record<string, string> {
   if (!item.thumbnailUrl) return {}
-  if (!item.boundingBox) {
-    return {
-      backgroundImage:    `url(${item.thumbnailUrl})`,
-      backgroundSize:     'cover',
-      backgroundPosition: 'center',
-    }
-  }
-
-  const { x, y, w, h } = item.boundingBox
-  const pad = 0.35
-
-  const cx  = x + w / 2
-  const cy  = y + h / 2
-  const pw  = Math.min(w * (1 + pad * 2), 1)
-  const ph  = Math.min(h * (1 + pad * 2), 1)
-  const ox  = Math.max(0, Math.min(cx - pw / 2, 1 - pw))
-  const oy  = Math.max(0, Math.min(cy - ph / 2, 1 - ph))
-  const imgW = THUMB_PX / pw
-  const imgH = THUMB_PX / ph
-
   return {
     backgroundImage:    `url(${item.thumbnailUrl})`,
-    backgroundSize:     `${imgW}px ${imgH}px`,
-    backgroundPosition: `-${ox * imgW}px -${oy * imgH}px`,
     backgroundRepeat:   'no-repeat',
+    backgroundSize:     '100%',
+    backgroundPosition: 'center center',
   }
 }
 

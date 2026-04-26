@@ -1,4 +1,4 @@
-import { gallerySections } from '~/composables/useGalleryData'
+import { addProvisionalItem, registerBlobUrl } from '~/composables/useGalleryData'
 
 /**
  * Upload state management.
@@ -110,10 +110,32 @@ export function useUpload() {
 
     // 2. Check for duplicates server-side
     const hashes = batch.map(uf => uf.hash).filter(Boolean) as string[]
-    const { duplicates } = await $fetch<{ duplicates: DuplicateInfo[] }>(
+    const { duplicates: rawDuplicates } = await $fetch<{ duplicates: Array<{
+      id:                string
+      hash:              string
+      original_filename: string
+      content_type:      string
+      size:              number
+      width?:            number | null
+      height?:           number | null
+      taken_at?:         string | null
+      thumbnail_url?:    string | null
+    }> }>(
       '/api/v1/media/check-duplicates',
       { method: 'POST', body: { hashes } },
     ).catch(() => ({ duplicates: [] }))
+
+    const duplicates: DuplicateInfo[] = rawDuplicates.map(d => ({
+      hash:             d.hash,
+      id:               d.id,
+      originalFilename: d.original_filename,
+      contentType:      d.content_type,
+      size:             d.size,
+      width:            d.width ?? undefined,
+      height:           d.height ?? undefined,
+      takenAt:          d.taken_at ?? undefined,
+      thumbnailSrc:     d.thumbnail_url ?? undefined,
+    }))
 
     const dupeMap = new Map(duplicates.map(d => [d.hash, d]))
     const conflicts: DuplicateConflict[] = batch
@@ -290,11 +312,11 @@ async function uploadOne(uf: UploadFile, libraryIds: string[]) {
     const dims = await measureImageDimensions(uf.file)
 
     // 1. Request presigned URL from our API
-    const { uploadUrl, objectKey } = await $fetch<{ uploadUrl: string; objectKey: string }>(
+    const { upload_url: uploadUrl, object_key: objectKey } = await $fetch<{ upload_url: string; object_key: string }>(
       '/api/v1/media/upload-url',
       {
         method: 'POST',
-        body: { filename: uf.file.name, contentType: uf.file.type, libraryIds },
+        body: { filename: uf.file.name, content_type: uf.file.type, library_ids: libraryIds },
       },
     )
 
@@ -336,43 +358,48 @@ async function uploadOne(uf: UploadFile, libraryIds: string[]) {
     const { id: mediaId } = await $fetch<{ id: string }>('/api/v1/media/complete', {
       method: 'POST',
       body: {
-        objectKey,
-        filename:    uf.file.name,
-        contentType: uf.file.type,
-        size:        uf.file.size,
-        libraryIds,
-        width:       dims?.width,
-        height:      dims?.height,
-        aspectRatio: dims?.aspectRatio,
-        takenAt:     itemTakenAt?.toISOString() ?? null,
-        hash:        uf.hash,
+        object_key:   objectKey,
+        filename:     uf.file.name,
+        content_type: uf.file.type,
+        size:         uf.file.size,
+        library_ids:  libraryIds,
+        width:        dims?.width,
+        height:       dims?.height,
+        aspect_ratio: dims?.aspectRatio,
+        taken_at:     itemTakenAt?.toISOString() ?? null,
+        hash:         uf.hash,
       },
     })
 
-    // 4. Optimistically add the item to the gallery — but only if the date
-    //    group for today is already rendered. If the user's library doesn't
-    //    have any items for today, the section isn't in the DOM yet, so
-    //    optimistically injecting would create a phantom section that
-    //    disappears on the next full refresh.
-    const provisionalTakenAt = itemTakenAt ?? new Date()
-    const localKey = `${provisionalTakenAt.getFullYear()}-${String(provisionalTakenAt.getMonth() + 1).padStart(2, '0')}-${String(provisionalTakenAt.getDate()).padStart(2, '0')}`
-    const groupAlreadyVisible = gallerySections.value.some(s => s.dateKey === localKey)
-
-    if (groupAlreadyVisible) {
-      const blobUrl = URL.createObjectURL(uf.file)
-      registerBlobUrl(mediaId, blobUrl)
-      addProvisionalItem({
-        id:               mediaId,
-        originalFilename: uf.file.name,
-        aspectRatio:      dims?.aspectRatio ?? 1.5,
-        width:            dims?.width  ?? Math.round((dims?.aspectRatio ?? 1.5) >= 1 ? 1200 : 800),
-        height:           dims?.height ?? Math.round((dims?.aspectRatio ?? 1.5) >= 1 ? 800 : 1200),
-        takenAt:          provisionalTakenAt.toISOString(),
-        isVideo:          uf.file.type.startsWith('video/'),
-        src:              blobUrl,
-        isProvisional:    true,
+    // Overwrite resolution: the new record was created — permanently delete the
+    // old one so it doesn't appear as a duplicate in the gallery.
+    // 'version' intentionally keeps both records; 'keep' never reaches here.
+    if (uf._conflictResolution === 'overwrite' && uf._conflictExistingId) {
+      await $fetch(`/api/v1/media/${uf._conflictExistingId}/permanent-delete`, {
+        method: 'POST',
+      }).catch(() => {
+        // Non-fatal — the new record is already created; the old one can be
+        // cleaned up manually from Trash if the delete fails.
       })
     }
+
+    // 4. Optimistically add the item to the gallery with a local blob URL.
+    //    The blob URL is preserved in the real item by loadLibraryMedia until
+    //    the background thumbnail job produces a server-side thumbnail.
+    const provisionalTakenAt = itemTakenAt ?? new Date()
+    const blobUrl = URL.createObjectURL(uf.file)
+    registerBlobUrl(mediaId, blobUrl)
+    addProvisionalItem({
+      id:               mediaId,
+      originalFilename: uf.file.name,
+      aspectRatio:      dims?.aspectRatio ?? 1.5,
+      width:            dims?.width  ?? Math.round((dims?.aspectRatio ?? 1.5) >= 1 ? 1200 : 800),
+      height:           dims?.height ?? Math.round((dims?.aspectRatio ?? 1.5) >= 1 ? 800 : 1200),
+      takenAt:          provisionalTakenAt.toISOString(),
+      isVideo:          uf.file.type.startsWith('video/'),
+      src:              blobUrl,
+      isProvisional:    false,
+    })
 
     entry.progress = 100
     entry.status   = 'done'

@@ -58,7 +58,7 @@ async function addToAlbum(album: AlbumSummary) {
   try {
     await $fetch(`/api/v1/albums/${album.id}/items`, {
       method: 'POST',
-      body:   { mediaIds: props.mediaIds },
+      body:   { media_ids: props.mediaIds },
     })
     emit('added', album.name)
     emit('update:open', false)
@@ -89,7 +89,7 @@ async function submitCreate() {
     })
     await $fetch(`/api/v1/albums/${newAlbum.id}/items`, {
       method: 'POST',
-      body:   { mediaIds: props.mediaIds },
+      body:   { media_ids: props.mediaIds },
     })
     emit('added', name)
     emit('update:open', false)

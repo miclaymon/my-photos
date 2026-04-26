@@ -1,7 +1,3 @@
-import { db } from '~/server/db'
-import { users } from '~/server/db/schema'
-import { eq } from 'drizzle-orm'
-
 export default defineEventHandler(async (event) => {
   const { email, password } = await readBody<{ email: string; password: string }>(event)
 
@@ -9,20 +5,45 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, message: 'Email and password are required' })
   }
 
-  const user = await db.select().from(users).where(eq(users.email, email.toLowerCase())).get()
+  const apiUrl = process.env.DATA_API_URL ?? 'http://localhost:8000'
 
-  // Always run verifyPassword to prevent timing-based user enumeration
-  const dummyHash = '$scrypt$n=16384,r=8,p=1$dummy$dummy'
-  const valid = user
-    ? await verifyPassword(user.passwordHash, password)
-    : await verifyPassword(dummyHash, password).catch(() => false)
+  // 1. Exchange credentials for tokens
+  let tokenData: { access_token: string; token_type: string; refresh_token: string }
+  try {
+    const res = await fetch(`${apiUrl}/api/v1/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    })
+    if (res.status === 401) throw createError({ statusCode: 401, message: 'Invalid credentials' })
+    if (!res.ok)           throw createError({ statusCode: 502, message: 'Auth service error' })
+    tokenData = await res.json()
+  } catch (err: unknown) {
+    const h3err = err as { statusCode?: number }
+    if (h3err?.statusCode) throw err
+    throw createError({ statusCode: 502, message: 'Auth service unavailable' })
+  }
 
-  if (!user || !valid) {
-    throw createError({ statusCode: 401, message: 'Invalid credentials' })
+  // 2. Fetch the authenticated user's profile so we can store real id + is_admin
+  let userInfo: { id: number; email: string; display_name: string | null; is_admin: boolean }
+  try {
+    const res = await fetch(`${apiUrl}/api/v1/auth/me`, {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    })
+    userInfo = await res.json()
+  } catch {
+    // Non-fatal — fall back to minimal shape if /me is unreachable
+    userInfo = { id: 0, email, display_name: null, is_admin: false }
   }
 
   await setUserSession(event, {
-    user: { id: user.id, email: user.email },
+    user: {
+      id:       userInfo.id,
+      email:    userInfo.email,
+      isAdmin:  userInfo.is_admin,
+    },
+    accessToken:  tokenData.access_token,
+    refreshToken: tokenData.refresh_token,
   })
 
   return { ok: true }

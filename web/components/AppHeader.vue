@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { MenuIcon, SearchIcon, SettingsIcon, UserCircleIcon, TerminalIcon, BellIcon } from 'lucide-vue-next'
+import { MenuIcon, SearchIcon, SettingsIcon, UserCircleIcon, TerminalIcon, BellIcon, LogOutIcon } from 'lucide-vue-next'
 import { onClickOutside } from '@vueuse/core'
 
 const { toggleSideNav, openSettings } = useAppShell()
@@ -8,8 +8,25 @@ const isDev = import.meta.dev
 
 const notifOpen    = ref(false)
 const notifPanelEl = ref<HTMLElement | null>(null)
-
 onClickOutside(notifPanelEl, () => { notifOpen.value = false })
+
+const accountOpen    = ref(false)
+const accountBtnEl   = ref<HTMLElement | null>(null)
+const accountPanelEl = ref<HTMLElement | null>(null)
+onClickOutside(accountPanelEl, (e) => {
+  if (accountBtnEl.value?.contains(e.target as Node)) return
+  accountOpen.value = false
+})
+
+const { user, clear: clearSession } = useUserSession()
+const accountEmail = computed(() => (user.value as { email?: string } | null)?.email ?? '')
+
+async function logout() {
+  accountOpen.value = false
+  await $fetch('/api/v1/auth/logout', { method: 'POST' }).catch(() => {})
+  await clearSession()
+  await navigateTo('/login')
+}
 </script>
 
 <template>
@@ -56,7 +73,12 @@ onClickOutside(notifPanelEl, () => { notifOpen.value = false })
       <button class="app-header-btn" aria-label="Settings" @click="openSettings">
         <SettingsIcon :size="20" />
       </button>
-      <button class="app-header-btn" aria-label="Account">
+      <button
+        ref="accountBtnEl"
+        class="app-header-btn"
+        aria-label="Account"
+        @click="accountOpen = !accountOpen"
+      >
         <UserCircleIcon :size="22" />
       </button>
     </div>
@@ -70,6 +92,20 @@ onClickOutside(notifPanelEl, () => { notifOpen.value = false })
           <button class="notif-close-btn" @click="notifOpen = false">×</button>
         </div>
         <div class="notif-empty">No new notifications</div>
+      </div>
+    </Transition>
+
+    <Transition name="notif-fade">
+      <div v-if="accountOpen" ref="accountPanelEl" class="account-panel">
+        <div class="account-panel-user">
+          <UserCircleIcon :size="28" class="account-panel-avatar" />
+          <span class="account-panel-email">{{ accountEmail }}</span>
+        </div>
+        <div class="account-panel-divider" />
+        <button class="account-panel-action" @click="logout">
+          <LogOutIcon :size="14" />
+          Sign out
+        </button>
       </div>
     </Transition>
   </Teleport>
@@ -117,4 +153,63 @@ onClickOutside(notifPanelEl, () => { notifOpen.value = false })
 }
 .notif-fade-enter-active, .notif-fade-leave-active { transition: opacity 0.15s, transform 0.15s; }
 .notif-fade-enter-from, .notif-fade-leave-to { opacity: 0; transform: translateY(-6px); }
+
+.account-panel {
+  position: fixed;
+  top: 52px;
+  right: 12px;
+  z-index: 300;
+  width: 220px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+  overflow: hidden;
+}
+
+.account-panel-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.account-panel-avatar {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.account-panel-email {
+  font-size: 13px;
+  color: var(--color-text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-panel-divider {
+  height: 1px;
+  background: var(--color-border);
+}
+
+.account-panel-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 11px 16px;
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.account-panel-action:hover {
+  background: var(--color-surface-raised, var(--color-surface));
+}
 </style>

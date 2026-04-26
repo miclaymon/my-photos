@@ -27,7 +27,7 @@ interface TrashApiItem {
 }
 
 const { data, pending, error, refresh } = await useFetch<{ items: TrashApiItem[] }>(
-  () => `/api/v1/trash?library=${libraryId.value}`,
+  () => `/api/v1/library/${libraryId.value}/trash`,
 )
 
 const { selectedIds, exitSelectionMode } = useGallery()
