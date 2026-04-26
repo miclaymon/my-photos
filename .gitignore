@@ -65,3 +65,16 @@ DESIGN.md
 REQUIREMENTS.md
 PLANNING.md
 TODO.md
+
+# ─── Python / FastAPI (api/) ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+api/logs/

@@ -1,0 +1,28 @@
+{
+  "name": "my-photos-nuxt",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "@nuxt/fonts": "^0.14.0",
+    "@nuxt/image": "^1.10.0",
+    "@nuxtjs/tailwindcss": "^6.13.2",
+    "@vueuse/core": "^14.2.1",
+    "exifreader": "^4.38.1",
+    "lucide-vue-next": "^1.0.0",
+    "nuxt": "^3.16.2",
+    "nuxt-auth-utils": "^0.5.16",
+    "vue": "latest",
+    "vue-router": "latest"
+  },
+  "devDependencies": {
+    "@nuxt/devtools": "latest",
+    "typescript": "^5.8.3"
+  }
+}
