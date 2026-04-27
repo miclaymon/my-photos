@@ -1,15 +1,14 @@
 <script setup lang="ts">
 /**
- * SimpleGallery — grid-only gallery with no date groupings, no mode toggle.
- * Accepts a flat list of MediaItem and renders them using MediaTile.
- * Clicking a tile navigates to /library/:id/preview/:id (same as the main gallery).
- * Supports selection mode with a customisable action pill slot.
+ * SimpleGallery — flat-list gallery with no date groupings.
+ * Supports both masonry (justified) and grid modes, respecting the user's
+ * gallery-mode setting from useGallery(). Ideal for archive, trash, search
+ * results, or any other flat-list context.
  */
 import { useElementSize } from '@vueuse/core'
-import { XIcon } from 'lucide-vue-next'
 import type { MediaItem } from '~/composables/useGalleryData'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   items:    ReadonlyArray<MediaItem>
   loading?: boolean
 }>(), {
@@ -19,37 +18,63 @@ withDefaults(defineProps<{
 const containerRef = ref<HTMLElement | null>(null)
 const { width: containerWidth } = useElementSize(containerRef)
 
-// 3px gap, matching PhotoGallery's 'normal' gap preset
-const GAP = 3
+const { galleryMode, gallerySize, galleryRowHeight, galleryGapPx, selectionMode } = useGallery()
+
+// ── Masonry (justified) layout ─────────────────────────────────────────────
+const { rows } = useJustifiedLayout(
+  computed(() => props.items as MediaItem[]),
+  containerWidth,
+  galleryRowHeight,
+  galleryGapPx,
+)
+
+// ── Grid layout ────────────────────────────────────────────────────────────
+const GRID_COLS_BY_SIZE: Record<string, number> = {
+  xs: 8, sm: 6, md: 5, lg: 4, xl: 3,
+}
 
 const gridCols = computed(() => {
-  const w = containerWidth.value
-  if (!w || w < 400) return 3
-  if (w < 640)  return 4
-  if (w < 900)  return 5
-  return 6
+  const base = GRID_COLS_BY_SIZE[gallerySize.value] ?? 5
+  if (!containerWidth.value || containerWidth.value < 480) return Math.min(3, base)
+  if (containerWidth.value < 768) return Math.min(4, base)
+  return base
 })
 
 const tileSize = computed(() => {
   if (!containerWidth.value) return 0
-  return Math.floor((containerWidth.value - (gridCols.value - 1) * GAP) / gridCols.value)
+  return Math.floor((containerWidth.value - (gridCols.value - 1) * galleryGapPx.value) / gridCols.value)
 })
-
-const { selectionMode, selectedCount, selectedIds, exitSelectionMode } = useGallery()
 </script>
 
 <template>
   <div ref="containerRef" class="sg-wrap" :class="{ 'selection-mode': selectionMode }">
-    <!-- ClientOnly prevents SSR/hydration size-mismatch -->
     <ClientOnly>
-      <template v-if="tileSize > 0">
+
+      <!-- Masonry (justified) layout -->
+      <template v-if="galleryMode === 'masonry' && items.length">
         <div
-          v-if="items.length"
+          v-for="(row, ri) in rows"
+          :key="ri"
+          class="gallery-row"
+          :style="{ gap: galleryGapPx + 'px', marginBottom: galleryGapPx + 'px' }"
+        >
+          <MediaTile
+            v-for="(item, ii) in row.items"
+            :key="item.id"
+            :item="item"
+            :width="row.widths[ii]!"
+            :height="row.height"
+          />
+        </div>
+        <!-- Skeleton while container width is not yet measured -->
+        <div v-if="containerWidth === 0" :style="{ height: galleryRowHeight + 'px' }" class="skeleton" />
+      </template>
+
+      <!-- Grid layout -->
+      <template v-else-if="galleryMode === 'grid' && tileSize > 0 && items.length">
+        <div
           class="sg-grid"
-          :style="{
-            gap:                 GAP + 'px',
-            gridTemplateColumns: `repeat(${gridCols}, ${tileSize}px)`,
-          }"
+          :style="{ gap: galleryGapPx + 'px', gridTemplateColumns: `repeat(${gridCols}, ${tileSize}px)` }"
         >
           <MediaTile
             v-for="item in items"
@@ -60,14 +85,15 @@ const { selectionMode, selectedCount, selectedIds, exitSelectionMode } = useGall
             grid-mode
           />
         </div>
-
-        <div v-else-if="!loading" class="gallery-empty">
-          <slot name="empty" />
-        </div>
       </template>
 
-      <!-- Skeleton while width is being measured or data loading -->
-      <div v-else class="sg-skeleton" />
+      <!-- Empty state (data loaded, nothing to show) -->
+      <div v-else-if="!loading && !items.length" class="gallery-empty">
+        <slot name="empty" />
+      </div>
+
+      <!-- Skeleton while width is being measured or data is loading -->
+      <div v-else-if="!items.length" class="sg-skeleton" />
 
       <template #fallback>
         <div class="sg-skeleton" />
@@ -75,29 +101,12 @@ const { selectionMode, selectedCount, selectedIds, exitSelectionMode } = useGall
     </ClientOnly>
   </div>
 
-  <!-- Selection pill — Teleported to body, same pattern as PhotoGallery -->
-  <Teleport to="body">
-    <Transition name="pill-pop">
-      <div v-if="selectionMode" class="selection-pill" role="status">
-        <span class="selection-pill-label">
-          {{ selectedCount }} {{ selectedCount === 1 ? 'item' : 'items' }} selected
-        </span>
-        <slot
-          name="selection-actions"
-          :selected-ids="selectedIds"
-          :selected-count="selectedCount"
-          :exit-selection-mode="exitSelectionMode"
-        />
-        <button
-          class="selection-pill-close"
-          aria-label="Exit selection mode"
-          @click="exitSelectionMode"
-        >
-          <XIcon :size="14" />
-        </button>
-      </div>
-    </Transition>
-  </Teleport>
+  <!-- Selection pill — delegates to shared GallerySelectionPill component -->
+  <GallerySelectionPill>
+    <template v-if="$slots['selection-actions']" #selection-actions="props">
+      <slot name="selection-actions" v-bind="props" />
+    </template>
+  </GallerySelectionPill>
 </template>
 
 <style scoped>
@@ -124,24 +133,4 @@ const { selectionMode, selectedCount, selectedIds, exitSelectionMode } = useGall
   0%, 100% { opacity: 0.5; }
   50%       { opacity: 1; }
 }
-
-/* Pill action buttons provided via selection-actions slot.
-   The pill background is var(--color-text-primary) and its text/icon color is
-   var(--color-bg), both of which invert with the theme. Use `color: inherit` so
-   these buttons match the pill's own text colour regardless of light/dark mode. */
-:deep(.pill-action) {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  border: none;
-  background: rgba(128,128,128,0.18);
-  color: inherit;
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-}
-:deep(.pill-action:hover)        { background: rgba(128,128,128,0.32); }
-:deep(.pill-action-danger:hover) { background: rgba(220,38,38,0.18); color: #dc2626; }
 </style>

@@ -17,9 +17,6 @@ const isAdmin = computed(() => !!(user.value as { isAdmin?: boolean } | null)?.i
 // Day groupings toggle (wired to the same key used by GallerySection)
 const showDayGroups = useLocalStorage('gallery-show-day-groups', true)
 
-// ── Preview settings (admin-only) ─────────────────────────────────────────────
-const showObjectBoxes = useLocalStorage('preview-show-object-boxes', false)
-
 // ── AI / Features settings ────────────────────────────────────────────────────
 const aiEnabled              = useLocalStorage('features-ai-enabled',              false)
 const aiPhotoStacking        = useLocalStorage('features-ai-photo-stacking',       false)
@@ -302,26 +299,6 @@ const modes: { value: GalleryMode; label: string }[] = [
                       </button>
                     </label>
                     <p class="settings-hint">Group photos by day inside each month</p>
-                  </div>
-                </section>
-
-                <!-- Preview section — admin only -->
-                <section v-if="isAdmin" class="settings-section">
-                  <h3 class="settings-section-title">Preview</h3>
-                  <div class="settings-field">
-                    <label class="settings-label settings-toggle-label">
-                      Show object detection hitboxes
-                      <button
-                        class="settings-toggle"
-                        :class="{ 'is-on': showObjectBoxes }"
-                        role="switch"
-                        :aria-checked="showObjectBoxes"
-                        @click="showObjectBoxes = !showObjectBoxes"
-                      >
-                        <span class="settings-toggle-thumb" />
-                      </button>
-                    </label>
-                    <p class="settings-hint">Overlay COCO-SSD detected object bounding boxes and labels on image previews</p>
                   </div>
                 </section>
 

@@ -39,7 +39,12 @@ async function logout() {
 
       <div class="app-header-brand">
         <span class="app-header-title">My Photos</span>
-        <LibrarySwitcher />
+        <ClientOnly>
+          <LibrarySwitcher />
+          <template #fallback>
+            <div class="library-switcher-skeleton skeleton" />
+          </template>
+        </ClientOnly>
       </div>
     </div>
 
@@ -112,6 +117,12 @@ async function logout() {
 </template>
 
 <style scoped>
+.library-switcher-skeleton {
+  width: 72px;
+  height: 24px;
+  border-radius: 6px;
+}
+
 .notif-panel {
   position: fixed;
   top: 52px;

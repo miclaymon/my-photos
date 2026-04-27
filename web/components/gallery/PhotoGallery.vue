@@ -1,17 +1,23 @@
 <script setup lang="ts">
-import { LayoutGridIcon, LayoutIcon, XIcon } from 'lucide-vue-next'
+import { LayoutGridIcon, LayoutIcon } from 'lucide-vue-next'
 import type { GallerySection } from '~/composables/useGalleryData'
 
 const props = withDefaults(defineProps<{
-  sections: ReadonlyArray<GallerySection>
-  title?:   string
-  loading?: boolean
+  sections:          ReadonlyArray<GallerySection>
+  title?:            string
+  loading?:          boolean
+  /** Set false to hide the masonry/grid toggle (e.g. album detail, search). Default: true. */
+  showModeToggle?:   boolean
+  /** Set false to suppress year/month group boundary headers inside sections. Default: true. */
+  showGroupHeaders?: boolean
 }>(), {
-  title:   'Photos',
-  loading: false,
+  title:            'Photos',
+  loading:          false,
+  showModeToggle:   true,
+  showGroupHeaders: true,
 })
 
-const { galleryMode, selectionMode, selectedCount, selectedIds, setMode, exitSelectionMode } = useGallery()
+const { galleryMode, selectionMode, setMode } = useGallery()
 
 // Track when the gallery header (title + inline toggle) has scrolled out of view
 const galleryHeaderRef = ref<HTMLElement | null>(null)
@@ -36,7 +42,7 @@ onMounted(() => {
     <div ref="galleryHeaderRef" class="gallery-header">
       <h1 class="gallery-title">{{ title }}</h1>
 
-      <div class="gallery-mode-toggle" role="group" aria-label="Gallery display mode">
+      <div v-if="showModeToggle" class="gallery-mode-toggle" role="group" aria-label="Gallery display mode">
         <button
           class="gallery-mode-btn"
           :class="{ 'is-active': galleryMode === 'masonry' }"
@@ -65,6 +71,7 @@ onMounted(() => {
         :key="section.dateKey"
         :section="section"
         :all-sections="sections"
+        :show-group-headers="showGroupHeaders"
       />
       <!-- Skeleton shown during SSR / before client mount -->
       <template #fallback>
@@ -85,7 +92,7 @@ onMounted(() => {
   </div>
 
   <!-- Floating mode toggle — appears when header has scrolled out of view -->
-  <Teleport to="body">
+  <Teleport v-if="showModeToggle" to="body">
     <Transition name="mode-float">
       <div v-if="modeFloating" class="gallery-mode-toggle gallery-mode-toggle-float" role="group" aria-label="Gallery display mode">
         <button
@@ -110,48 +117,10 @@ onMounted(() => {
     </Transition>
   </Teleport>
 
-  <!-- Selection pill — persistent bottom-center notification -->
-  <Teleport to="body">
-    <Transition name="pill-pop">
-      <div v-if="selectionMode" class="selection-pill" role="status">
-        <span class="selection-pill-label">
-          {{ selectedCount }} {{ selectedCount === 1 ? 'item' : 'items' }} selected
-        </span>
-        <!-- Slot for context-specific actions (archive, trash, restore, etc.) -->
-        <slot
-          name="selection-actions"
-          :selected-ids="selectedIds"
-          :selected-count="selectedCount"
-          :exit-selection-mode="exitSelectionMode"
-        />
-        <button
-          class="selection-pill-close"
-          aria-label="Exit selection mode"
-          @click="exitSelectionMode"
-        >
-          <XIcon :size="14" />
-        </button>
-      </div>
-    </Transition>
-  </Teleport>
+  <!-- Selection pill — delegates to shared GallerySelectionPill component -->
+  <GallerySelectionPill>
+    <template v-if="$slots['selection-actions']" #selection-actions="props">
+      <slot name="selection-actions" v-bind="props" />
+    </template>
+  </GallerySelectionPill>
 </template>
-
-<style scoped>
-/* Slot-provided action buttons (archive, trash, restore, etc.) share this style
-   via a global class so each page can use its own icons without repeating CSS. */
-:deep(.pill-action) {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  border: none;
-  background: rgba(128,128,128,0.18);
-  color: inherit; /* inherits var(--color-bg) from .selection-pill, which inverts with theme */
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-}
-:deep(.pill-action:hover)        { background: rgba(128,128,128,0.32); }
-:deep(.pill-action-danger:hover) { background: rgba(220,38,38,0.18); color: #dc2626; }
-</style>

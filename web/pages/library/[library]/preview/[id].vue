@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { XIcon, ChevronLeftIcon, ChevronRightIcon, InfoIcon, UserIcon, PawPrintIcon, TagIcon, ChevronDownIcon, BookmarkPlusIcon, BarcodeIcon, ExternalLinkIcon } from 'lucide-vue-next'
+import { XIcon, ChevronLeftIcon, ChevronRightIcon, InfoIcon, UserIcon, PawPrintIcon, TagIcon, ChevronDownIcon, BookmarkPlusIcon, BarcodeIcon, ExternalLinkIcon, ScanEyeIcon } from 'lucide-vue-next'
 import { useElementBounding, useLocalStorage } from '@vueuse/core'
 import type { MediaItem } from '~/composables/useGalleryData'
 
@@ -241,18 +241,26 @@ interface MediaSubject {
 }
 
 const mediaSubjects   = ref<MediaSubject[]>([])
-const showFaceBoxes   = ref(false)
 
-// Small delay on hide so the chip (which hangs below the image edge) stays visible
-// briefly when the mouse leaves the image toward the chip area.
+// ── X-Ray mode ──────────────────────────────────���─────────────────────────
+// When enabled, all detection overlays (faces, objects, barcodes) are always
+// visible. When off, they only appear on image hover.
+const xrayMode = useLocalStorage('preview-xray-mode', false)
+function toggleXray() { xrayMode.value = !xrayMode.value }
+
+// Hover-based show/hide (used when X-Ray is off)
+const imageHovered  = ref(false)
 let _hideBoxesTimer: ReturnType<typeof setTimeout> | null = null
 function onImgMouseEnter() {
   if (_hideBoxesTimer) { clearTimeout(_hideBoxesTimer); _hideBoxesTimer = null }
-  showFaceBoxes.value = true
+  imageHovered.value = true
 }
 function onImgMouseLeave() {
-  _hideBoxesTimer = setTimeout(() => { showFaceBoxes.value = false }, 150)
+  _hideBoxesTimer = setTimeout(() => { imageHovered.value = false }, 150)
 }
+
+// Boxes are visible when X-Ray is on OR the user is hovering over the image.
+const boxesVisible = computed(() => xrayMode.value || imageHovered.value)
 
 async function loadSubjects() {
   if (!item.value || item.value.isVideo) { mediaSubjects.value = []; return }
@@ -494,10 +502,8 @@ interface MediaObjectDetection {
   boundingBox: { x: number; y: number; w: number; h: number }
 }
 
-const showObjectBoxes   = useLocalStorage('preview-show-object-boxes', false)
-const { user }          = useUserSession()
-const isAdmin           = computed(() => !!(user.value as { isAdmin?: boolean } | null)?.isAdmin)
-const objectBoxesActive = computed(() => isAdmin.value && showObjectBoxes.value)
+// Objects load whenever X-Ray mode is active (available to all users).
+const objectBoxesActive = computed(() => xrayMode.value)
 
 const mediaObjectDetections = ref<MediaObjectDetection[]>([])
 
@@ -626,6 +632,7 @@ function onKey(e: KeyboardEvent) {
   if (e.key === 'ArrowRight') { e.preventDefault(); goNext()       }
   if (e.key === 'Escape')     { e.preventDefault(); closePreview() }
   if (e.key === 'i')          { e.preventDefault(); toggleInfo()   }
+  if (e.key === 'x')          { e.preventDefault(); toggleXray()   }
 }
 
 onMounted(()   => window.addEventListener('keydown', onKey))
@@ -641,8 +648,17 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
       @click.self="closePreview"
     >
 
-      <!-- Top-right controls: info + close -->
+      <!-- Top-right controls: x-ray + info + close -->
       <div class="preview-controls">
+        <button
+          class="preview-ctrl-btn"
+          :class="{ 'is-active': xrayMode }"
+          aria-label="X-Ray mode"
+          title="X-Ray (X)"
+          @click="toggleXray"
+        >
+          <ScanEyeIcon :size="18" />
+        </button>
         <button
           class="preview-ctrl-btn"
           :class="{ 'is-active': infoOpen }"
@@ -990,7 +1006,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
        Teleported to body so they layer above the fixed preview-page backdrop.
        Positioned in viewport coordinates using the measured image element bounds. -->
   <Teleport to="body">
-    <template v-if="showFaceBoxes && fullLoaded && mediaSubjects.length">
+    <template v-if="boxesVisible && fullLoaded && mediaSubjects.length">
       <div
         v-for="subj in mediaSubjects"
         :key="subj.subjectId"
@@ -1071,10 +1087,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
       </div>
     </Transition>
 
-    <!-- ── Object detection boxes (admin setting) ──────────────────────────
-         Show/hide tied to the same image hover as face boxes.
-         Box border and label use the class-deterministic color. -->
-    <template v-if="showFaceBoxes && fullLoaded && objectBoxesActive && mediaObjectDetections.length">
+    <!-- ── Object detection boxes (X-Ray mode) ─────────────────────────────
+         Box border and label use a class-deterministic color. -->
+    <template v-if="boxesVisible && fullLoaded && objectBoxesActive && mediaObjectDetections.length">
       <div
         v-for="obj in mediaObjectDetections"
         :key="obj.id"
@@ -1095,7 +1110,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
     </template>
 
     <!-- ── Barcode hover boxes ──────────────────────────────────────────────── -->
-    <template v-if="showFaceBoxes && fullLoaded">
+    <template v-if="boxesVisible && fullLoaded">
       <div
         v-for="(bc, i) in mediaBarcodes.filter(b => b.boundingBox)"
         :key="'bc-' + i"

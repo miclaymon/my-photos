@@ -7,7 +7,7 @@ const route   = useRoute()
 const router  = useRouter()
 const { setActiveLibrary, activeLibraryId } = useAppShell()
 const { sections, isLoading, loadLibraryMedia } = useGalleryData()
-const { activeStickyKey }                   = useActiveStickySection()
+const { activeStickyKey, mountScrollTracking, unmountScrollTracking, recompute } = useActiveStickySection()
 const { libraries }                         = useLibraries()
 const { addFiles }                          = useUpload()
 const { selectedIds, exitSelectionMode }    = useGallery()
@@ -20,21 +20,27 @@ watch(librarySlug, (id) => {
   loadLibraryMedia(id)
 }, { immediate: true })
 
-// ── Date hash tracking (sticky-based) ────────────────────────────────────
+// ── Scroll tracking + date hash ───────────────────────────────────────────
+onMounted(() => { mountScrollTracking() })
+onUnmounted(() => { unmountScrollTracking() })
+
+// After sections load (data fetch returns), scroll to the hash target then
+// recompute to set the initial active key correctly.
+watch(sections, async (secs) => {
+  if (secs.length === 0) return
+  await nextTick()
+  if (route.hash) {
+    const dateKey = route.hash.slice(1)
+    const el = document.querySelector<HTMLElement>(`[data-gallery-section="${dateKey}"]`)
+    el?.scrollIntoView({ behavior: 'instant', block: 'start' })
+    await nextTick()
+  }
+  recompute()
+}, { once: true })
+
 watch(activeStickyKey, (key) => {
   const newHash = key ? `#${key}` : ''
   if (route.hash !== newHash) router.replace({ hash: newHash })
-})
-
-// ── Scroll-to-date on mount ───────────────────────────────────────────────
-onMounted(() => {
-  if (route.hash) {
-    const dateKey = route.hash.slice(1)
-    nextTick(() => {
-      const el = document.querySelector<HTMLElement>(`[data-gallery-section="${dateKey}"]`)
-      el?.scrollIntoView({ behavior: 'instant', block: 'start' })
-    })
-  }
 })
 
 // ── Selection actions ─────────────────────────────────────────────────────

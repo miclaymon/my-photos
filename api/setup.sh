@@ -50,15 +50,13 @@ else
   success ".venv already exists"
 fi
 
-# Activate
-# shellcheck disable=SC1091
-source .venv/bin/activate
-success "Virtual environment activated"
+PYTHON=".venv/bin/python"
+success "Virtual environment ready"
 
 # ─── 3. install dependencies ──────────────────────────────────────────────────
 header "Installing dependencies…"
-pip install --quiet --upgrade pip
-pip install --quiet -r requirements.txt
+"$PYTHON" -m pip install --quiet --upgrade pip
+"$PYTHON" -m pip install --quiet -r requirements.txt
 success "Dependencies installed"
 
 # ─── 4. database + .env + migrations + admin account ─────────────────────────
@@ -67,11 +65,11 @@ header "Database setup…"
 if [[ -f .env ]]; then
   success ".env already exists — skipping interactive setup"
   info "Running any pending migrations…"
-  python -m alembic upgrade head
+  "$PYTHON" -m alembic upgrade head
   success "Migrations applied"
 else
   info "Running interactive setup (creates .env, database, migrations, admin account)…"
-  python scripts/setup_db.py
+  "$PYTHON" scripts/setup_db.py
 fi
 
 # ─── done ─────────────────────────────────────────────────────────────────────

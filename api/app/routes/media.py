@@ -391,13 +391,22 @@ def get_subjects(
         .all()
     )
 
-    results = []
+    # Deduplicate by subject_id: one row per subject, preferring detections with a
+    # face crop key so the best available thumbnail wins when there are multiple
+    # detections of the same person/pet in the same photo.
+    best: dict[str, tuple[SubjectDetection, Subject]] = {}
     for detection, subject in rows:
+        existing = best.get(subject.id)
+        if existing is None or (detection.face_crop_key and not existing[0].face_crop_key):
+            best[subject.id] = (detection, subject)
+
+    results = []
+    for detection, subject in best.values():
         bounding_box = detection.bounding_box  # already fractional (0-1)
 
         # Build thumbnail URL for this subject.
-        # Prefer the face crop from this detection, then the detection's own crop,
-        # then subject cover, then representative detection thumbnail.
+        # Prefer the face crop from this detection, then subject cover, then
+        # representative detection thumbnail.
         thumbnail_url: Optional[str] = None
 
         if detection.face_crop_key:

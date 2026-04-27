@@ -111,8 +111,8 @@ const hoverCssVars = computed(() => {
 const router = useRouter()
 const route  = useRoute()
 const { activeLibraryId } = useAppShell()
-// Prefer the route param (library-scoped pages); fall back to the active library
-// for pages like /archive and /trash that aren't under /library/:id/
+// Prefer the route param (all library-scoped pages expose it); fall back to the
+// active library as a safety net for any non-library-scoped context.
 const libraryId = computed(() =>
   (route.params.library as string | undefined) ?? activeLibraryId.value,
 )

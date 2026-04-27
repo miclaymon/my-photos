@@ -4,19 +4,23 @@
     <div class="app-body">
       <AppSideNav />
       <main id="main-content" class="app-main">
-        <slot />
+        <ClientOnly>
+          <slot />
+        </ClientOnly>
       </main>
     </div>
   </div>
 
-  <!-- Global overlays (available on all authenticated pages) -->
-  <AppSettingsModal />
-  <AppUploadOverlay />
-  <AppLibraryPicker />
-  <AppUploadToast />
-  <AppToast />
-  <AppDragGhost />
-  <AppDragZoneOverlay />
-  <AppDuplicateConflictModal />
-  <AppCreateLibraryModal />
+  <!-- Global overlays — client-only: all depend on localStorage / drag / upload state -->
+  <ClientOnly>
+    <AppSettingsModal />
+    <AppUploadOverlay />
+    <AppLibraryPicker />
+    <AppUploadToast />
+    <AppToast />
+    <AppDragGhost />
+    <AppDragZoneOverlay />
+    <AppDuplicateConflictModal />
+    <AppCreateLibraryModal />
+  </ClientOnly>
 </template>

@@ -27,8 +27,7 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-# shellcheck disable=SC1091
-source .venv/bin/activate
+PYTHON=".venv/bin/python"
 # shellcheck disable=SC1091
 source .env 2>/dev/null || true
 
@@ -44,7 +43,7 @@ fi
 
 # ─── apply any pending migrations before starting ─────────────────────────────
 info "Applying any pending migrations…"
-python -m alembic upgrade head
+"$PYTHON" -m alembic upgrade head
 
 # ─── start ────────────────────────────────────────────────────────────────────
 HOST="${API_HOST:-127.0.0.1}"
@@ -53,4 +52,4 @@ PORT="${API_PORT:-8000}"
 info "Starting FastAPI dev server on http://${HOST}:${PORT} …"
 info "API docs available at http://${HOST}:${PORT}/docs"
 echo ""
-uvicorn main:app --host "$HOST" --port "$PORT" --reload
+".venv/bin/uvicorn" main:app --host "$HOST" --port "$PORT" --reload

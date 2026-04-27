@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { useElementSize } from '@vueuse/core'
+import { useElementSize, useLocalStorage } from '@vueuse/core'
 import { CheckIcon, MinusIcon } from 'lucide-vue-next'
 import type { GallerySection } from '~/composables/useGalleryData'
 
 const props = defineProps<{
-  section:      GallerySection
+  section:           GallerySection
   /** All sections in the current gallery — used for cross-section year/month selection.
    *  Falls back to useGalleryData().sections when omitted (backwards-compatible). */
-  allSections?: ReadonlyArray<GallerySection>
+  allSections?:      ReadonlyArray<GallerySection>
+  /** Set false to suppress the year/month group boundary headers. Default: true. */
+  showGroupHeaders?: boolean
 }>()
 
 const contentEl  = ref<HTMLElement | null>(null)
@@ -16,32 +18,21 @@ const isStuck    = ref(false)
 
 const { width: containerWidth } = useElementSize(contentEl)
 
-const { setStickySection, clearStickySection } = useActiveStickySection()
+const { registerSection, unregisterSection, activeStickyKey } = useActiveStickySection()
 
-// Detect when the sticky header is "stuck" (pinned at top of scroll container).
-// Technique: a sentinel <div> sits just above the header at position sticky top:-1px.
-// When it leaves the viewport upward, the header must be stuck.
+// Register the sticky header element so the scroll-based tracker can measure it.
+// isStuck is derived from whether this section is currently the active pinned one.
 onMounted(() => {
-  if (!headerEl.value) return
-  const sentinel = document.createElement('div')
-  sentinel.style.cssText = 'position:sticky;top:-1px;height:1px;pointer-events:none;visibility:hidden'
-  headerEl.value.insertAdjacentElement('beforebegin', sentinel)
-
-  const observer = new IntersectionObserver(
-    ([entry]) => {
-      isStuck.value = !entry!.isIntersecting
-      if (isStuck.value) setStickySection(props.section.dateKey)
-      else clearStickySection(props.section.dateKey)
-    },
-    { root: headerEl.value.closest('#main-content') ?? null, threshold: [0] },
-  )
-  observer.observe(sentinel)
-  onUnmounted(() => {
-    observer.disconnect()
-    sentinel.remove()
-    clearStickySection(props.section.dateKey)
-  })
+  if (headerEl.value) registerSection(props.section.dateKey, headerEl.value)
 })
+onUnmounted(() => {
+  unregisterSection(props.section.dateKey)
+})
+
+// A section is visually stuck only when it is the active pinned one.
+watch(activeStickyKey, (key) => {
+  isStuck.value = key === props.section.dateKey
+}, { immediate: true })
 
 const {
   galleryMode,
@@ -52,6 +43,9 @@ const {
   selectAll,
   deselectAll,
 } = useGallery()
+
+// User setting: whether to show day-level sticky headers (Settings → Appearance).
+const showDayGroups = useLocalStorage('gallery-show-day-groups', true)
 
 // ── Hover-reveal logic ────────────────────────────────────────────────────
 // Hovering any header for HOVER_DELAY ms reveals its checkbox without
@@ -167,7 +161,7 @@ const gridTileSize = computed(() => {
 
     <!-- Year boundary header (non-sticky, appears once per year) -->
     <div
-      v-if="section.showYearHeader"
+      v-if="showGroupHeaders !== false && section.showYearHeader"
       class="gallery-group-header gallery-year-header"
       :class="{ 'reveal-checkbox': selectionMode || yearSomeSelected || yearAllSelected || yearHoverReveal }"
       @mouseenter="onYearEnter"
@@ -189,7 +183,7 @@ const gridTileSize = computed(() => {
 
     <!-- Month boundary header (non-sticky, appears once per month) -->
     <div
-      v-if="section.showMonthHeader"
+      v-if="showGroupHeaders !== false && section.showMonthHeader"
       class="gallery-group-header gallery-month-header"
       :class="{ 'reveal-checkbox': selectionMode || monthSomeSelected || monthAllSelected || monthHoverReveal }"
       @mouseenter="onMonthEnter"
@@ -209,8 +203,9 @@ const gridTileSize = computed(() => {
       <span class="gallery-group-label gallery-month-label">{{ section.monthLabel }}</span>
     </div>
 
-    <!-- Sticky date header -->
+    <!-- Sticky date header (hidden when user turns off day groupings in Settings) -->
     <div
+      v-show="showDayGroups"
       ref="headerEl"
       class="gallery-section-header"
       :class="{ 'reveal-checkbox': selectionMode || someSelected || allSelected || sectionHoverReveal, 'is-stuck': isStuck }"

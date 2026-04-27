@@ -411,7 +411,7 @@ def list_subjects(
                 if subj.type == "person":
                     bounding_box = rep.bounding_box
 
-        # Fallback: find any detection with a saved face crop
+        # Fallback: find any detection with a saved face crop (persons only)
         if thumbnail_url is None and subj.type == "person":
             any_crop = (
                 db.query(SubjectDetection)
@@ -424,6 +424,22 @@ def list_subjects(
             if any_crop:
                 thumbnail_url = _presign(any_crop.face_crop_key)
                 bounding_box = any_crop.bounding_box
+
+        # Fallback: pets — use thumbnail of any matching media_object in this library
+        if thumbnail_url is None and subj.type == "pet" and subj.pet_class:
+            any_obj = (
+                db.query(MediaObject)
+                .join(LibraryMedia, LibraryMedia.media_id == MediaObject.media_id)
+                .filter(
+                    LibraryMedia.library_id == library_id,
+                    MediaObject.class_name.in_(subj.pet_class),
+                )
+                .first()
+            )
+            if any_obj:
+                pet_media = db.query(Media).filter(Media.id == any_obj.media_id).first()
+                if pet_media:
+                    thumbnail_url = _presign(pet_media.thumbnail_object_key or pet_media.object_key)
 
         result.append({
             "id": subj.id,
