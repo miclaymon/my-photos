@@ -12,10 +12,61 @@ export const GAP_VALUES: Record<GalleryGap, number> = {
   tight: 2, normal: 3, loose: 8,
 }
 
-// Module-level singletons
-const galleryMode     = useLocalStorage<GalleryMode>('gallery-mode', 'masonry')
-const gallerySize     = useLocalStorage<GallerySize>('gallery-size', 'md')
-const galleryGap      = useLocalStorage<GalleryGap>('gallery-gap', 'normal')
+// ── Per-gallery display config ─────────────────────────────────────────────────
+//
+// Each gallery has its own settings stored as JSON under `gallery#<id>`.
+// PhotoGallery / SimpleGallery create the config for their galleryId and
+// provide() it via GALLERY_CONFIG_KEY so descendant components (GallerySection,
+// MediaTile, etc.) get the right config via inject() inside useGallery().
+//
+// Components outside any gallery tree (AppSettingsModal) get the config of the
+// most recently mounted gallery, tracked reactively via _activeConfig.
+
+export const GALLERY_CONFIG_KEY = Symbol('galleryConfig')
+
+interface GalleryConfig {
+  mode:          GalleryMode
+  size:          GallerySize
+  gap:           GalleryGap
+  showDayGroups: boolean
+}
+
+const CONFIG_DEFAULTS: GalleryConfig = {
+  mode: 'masonry', size: 'md', gap: 'normal', showDayGroups: true,
+}
+
+export function useGalleryConfig(galleryId: string, defaults?: Partial<GalleryConfig>) {
+  const stored = useLocalStorage<GalleryConfig>(`gallery#${galleryId}`, { ...CONFIG_DEFAULTS, ...defaults })
+
+  return {
+    galleryMode:      computed(() => stored.value.mode),
+    gallerySize:      computed(() => stored.value.size),
+    galleryGap:       computed(() => stored.value.gap),
+    showDayGroups:    computed(() => stored.value.showDayGroups),
+    galleryRowHeight: computed(() => ROW_HEIGHTS[stored.value.size] ?? ROW_HEIGHTS.md),
+    galleryGapPx:     computed(() => GAP_VALUES[stored.value.gap]   ?? GAP_VALUES.normal),
+    setMode:          (m: GalleryMode) => { stored.value = { ...stored.value, mode: m } },
+    setSize:          (s: GallerySize) => { stored.value = { ...stored.value, size: s } },
+    setGap:           (g: GalleryGap)  => { stored.value = { ...stored.value, gap:  g } },
+    setShowDayGroups: (v: boolean)     => { stored.value = { ...stored.value, showDayGroups: v } },
+  }
+}
+
+export type GalleryConfigRef = ReturnType<typeof useGalleryConfig>
+
+// The config of the most recently mounted gallery component — read by components
+// that are not descendants of a gallery (e.g. AppSettingsModal in the layout).
+const _activeConfig = shallowRef<GalleryConfigRef | null>(null)
+
+export function registerActiveGalleryConfig(config: GalleryConfigRef) {
+  _activeConfig.value = config
+}
+export function unregisterActiveGalleryConfig(config: GalleryConfigRef) {
+  if (_activeConfig.value === config) _activeConfig.value = null
+}
+
+// ── Session state (module-level, shared) ──────────────────────────────────────
+
 const selectionMode   = ref(false)
 const selectedIds     = ref(new Set<string>())
 const lastSelectedId  = ref<string | null>(null)
@@ -68,13 +119,31 @@ if (import.meta.client) {
   })
 }
 
-export function useGallery() {
-  const galleryRowHeight = computed(() => ROW_HEIGHTS[gallerySize.value])
-  const galleryGapPx     = computed(() => GAP_VALUES[galleryGap.value])
+// ── useGallery ─────────────────────────────────────────────────────────────────
 
-  function setMode(mode: GalleryMode) { galleryMode.value = mode }
-  function setSize(size: GallerySize) { gallerySize.value = size }
-  function setGap(gap: GalleryGap)    { galleryGap.value  = gap  }
+export function useGallery() {
+  // Resolve display config: injected from nearest gallery ancestor (inside
+  // PhotoGallery/SimpleGallery trees) or tracked active config (everywhere else).
+  // inject() only works inside component setup — getCurrentInstance() guards that.
+  const injected = getCurrentInstance()
+    ? inject<GalleryConfigRef | null>(GALLERY_CONFIG_KEY, null)
+    : null
+
+  // For non-injected contexts, build computed refs that track _activeConfig
+  // reactively so AppSettingsModal stays in sync when the user navigates.
+  const galleryMode     = injected?.galleryMode     ?? computed(() => _activeConfig.value?.galleryMode.value     ?? CONFIG_DEFAULTS.mode)
+  const gallerySize     = injected?.gallerySize     ?? computed(() => _activeConfig.value?.gallerySize.value     ?? CONFIG_DEFAULTS.size)
+  const galleryGap      = injected?.galleryGap      ?? computed(() => _activeConfig.value?.galleryGap.value      ?? CONFIG_DEFAULTS.gap)
+  const showDayGroups   = injected?.showDayGroups   ?? computed(() => _activeConfig.value?.showDayGroups.value   ?? CONFIG_DEFAULTS.showDayGroups)
+  const galleryRowHeight = injected?.galleryRowHeight ?? computed(() => _activeConfig.value?.galleryRowHeight.value ?? ROW_HEIGHTS.md)
+  const galleryGapPx    = injected?.galleryGapPx    ?? computed(() => _activeConfig.value?.galleryGapPx.value    ?? GAP_VALUES.normal)
+
+  function resolvedConfig() { return injected ?? _activeConfig.value }
+
+  function setMode(mode: GalleryMode) { resolvedConfig()?.setMode(mode) }
+  function setSize(size: GallerySize) { resolvedConfig()?.setSize(size) }
+  function setGap(gap: GalleryGap)    { resolvedConfig()?.setGap(gap)   }
+  function setShowDayGroups(v: boolean) { resolvedConfig()?.setShowDayGroups(v) }
 
   function toggleSelectionMode() {
     selectionMode.value = !selectionMode.value
@@ -152,25 +221,28 @@ export function useGallery() {
 
   function closePreview() { _closePreview() }
 
-  /** Directly set the transitioning ID (used by preview page on close). */
   function setTransitioning(id: string | null) {
     transitioningId.value = id
   }
 
   return {
-    galleryMode:    readonly(galleryMode),
-    gallerySize:    readonly(gallerySize),
-    galleryGap:     readonly(galleryGap),
+    // Display config (per-gallery)
+    galleryMode,
+    gallerySize,
+    galleryGap,
+    showDayGroups,
     galleryRowHeight,
     galleryGapPx,
+    setMode,
+    setSize,
+    setGap,
+    setShowDayGroups,
+    // Session state (shared)
     selectionMode:   readonly(selectionMode),
     selectedIds:     readonly(selectedIds),
     selectedCount:   computed(() => selectedIds.value.size),
     previewId:       readonly(previewId),
     transitioningId: readonly(transitioningId),
-    setMode,
-    setSize,
-    setGap,
     toggleSelectionMode,
     exitSelectionMode,
     toggleItem,

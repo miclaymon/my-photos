@@ -7,18 +7,43 @@
  */
 import { useElementSize } from '@vueuse/core'
 import type { MediaItem } from '~/composables/useGalleryData'
+import { GALLERY_CONFIG_KEY, useGalleryConfig, registerActiveGalleryConfig, unregisterActiveGalleryConfig, ROW_HEIGHTS } from '~/composables/useGallery'
+import type { GalleryMode, GallerySize } from '~/composables/useGallery'
 
 const props = withDefaults(defineProps<{
-  items:    ReadonlyArray<MediaItem>
-  loading?: boolean
+  items:        ReadonlyArray<MediaItem>
+  galleryId?:   string
+  loading?:     boolean
+  /** Always use this mode, ignoring the stored user preference. */
+  forcedMode?:  GalleryMode
+  /** Always use this size, ignoring the stored user preference. */
+  forcedSize?:  GallerySize
+  /** Initial mode for first-time visitors (can still be changed and saved). */
+  defaultMode?: GalleryMode
+  /** Initial size for first-time visitors (can still be changed and saved). */
+  defaultSize?: GallerySize
 }>(), {
-  loading: false,
+  galleryId: 'default',
+  loading:   false,
 })
+
+const config = useGalleryConfig(props.galleryId, {
+  ...(props.defaultMode ? { mode: props.defaultMode } : {}),
+  ...(props.defaultSize ? { size: props.defaultSize } : {}),
+})
+provide(GALLERY_CONFIG_KEY, config)
+
+onMounted(()   => registerActiveGalleryConfig(config))
+onUnmounted(() => { unregisterActiveGalleryConfig(config); exitSelectionMode() })
 
 const containerRef = ref<HTMLElement | null>(null)
 const { width: containerWidth } = useElementSize(containerRef)
 
-const { galleryMode, gallerySize, galleryRowHeight, galleryGapPx, selectionMode } = useGallery()
+const { galleryGapPx } = config
+const galleryMode      = computed(() => props.forcedMode ?? config.galleryMode.value)
+const gallerySize      = computed(() => props.forcedSize ?? config.gallerySize.value)
+const galleryRowHeight = computed(() => ROW_HEIGHTS[gallerySize.value] ?? ROW_HEIGHTS.md)
+const { selectionMode, exitSelectionMode } = useGallery()
 
 // ── Masonry (justified) layout ─────────────────────────────────────────────
 const { rows } = useJustifiedLayout(
@@ -112,7 +137,7 @@ const tileSize = computed(() => {
 <style scoped>
 .sg-wrap {
   width: 100%;
-  padding: 8px;
+  padding: 8px 24px;
   box-sizing: border-box;
 }
 

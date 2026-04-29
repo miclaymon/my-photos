@@ -188,7 +188,8 @@ async function loadLibraryMedia(libraryId: string) {
       width:             number
       height:            number
       aspect_ratio:      number
-      taken_at:          string
+      taken_at:          string | null
+      created_at?:       string
       is_video:          boolean
       duration_seconds?: number
       // src is omitted for images (null) — only present for videos without a thumbnail.
@@ -222,7 +223,7 @@ async function loadLibraryMedia(libraryId: string) {
         aspectRatio:      item.aspect_ratio,
         width:            item.width,
         height:           item.height,
-        takenAt:          item.taken_at,
+        takenAt:          item.taken_at ?? item.created_at ?? new Date().toISOString(),
         isVideo:          item.is_video,
         duration:         item.duration_seconds
                             ? formatDuration(Math.round(item.duration_seconds)) : undefined,

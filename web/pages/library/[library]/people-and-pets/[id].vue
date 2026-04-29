@@ -33,15 +33,21 @@ interface MediaItem {
 }
 
 interface SubjectDetail {
-  id:     string
-  type:   'person' | 'pet'
-  name:   string | null
-  hidden: boolean
+  id:                        string
+  type:                      'person' | 'pet'
+  name:                      string | null
+  hidden:                    boolean
+  coverMediaId?:             string | null
+  representativeDetectionId?: number | null
 }
 
 interface SubjectMediaRaw {
-  subject: { id: string; type: string; name: string | null; hidden: boolean }
-  media:   Array<Record<string, unknown>>
+  subject: {
+    id: string; type: string; name: string | null; hidden: boolean
+    cover_media_id?: string | null
+    representative_detection_id?: number | null
+  }
+  media: Array<Record<string, unknown>>
 }
 
 function mapMediaItem(raw: Record<string, unknown>): MediaItem {
@@ -68,9 +74,17 @@ const { data: rawData, pending, refresh: rawRefresh } = await useFetch<SubjectMe
 
 const data = computed(() => {
   if (!rawData.value) return null
+  const raw = rawData.value.subject
   return {
-    subject: rawData.value.subject as SubjectDetail,
-    media:   (rawData.value.media ?? []).map(mapMediaItem),
+    subject: {
+      id:                        raw.id,
+      type:                      raw.type as 'person' | 'pet',
+      name:                      raw.name,
+      hidden:                    raw.hidden,
+      coverMediaId:              raw.cover_media_id ?? null,
+      representativeDetectionId: raw.representative_detection_id ?? null,
+    } satisfies SubjectDetail,
+    media: (rawData.value.media ?? []).map(mapMediaItem),
   }
 })
 
@@ -84,16 +98,32 @@ const reviewItems    = computed(() => allMedia.value.filter(m => m.reviewNeeded)
 const confirmedItems = computed(() => allMedia.value.filter(m => !m.reviewNeeded))
 
 // ── Cover photo ───────────────────────────────────────────────────────────────
-// Optimistically updated when the user picks a new cover; falls back to the
-// first item in the list (highest-confidence, as returned by the API).
-// Reset whenever subjectId changes so navigating to a different subject starts fresh.
+// Optimistically updated when the user picks a new cover; reset on subject navigation.
 const localCoverUrl = ref<string | null>(null)
 watch(subjectId, () => { localCoverUrl.value = null })
 
-// Header uses the face crop (not the full photo thumbnail) so we see the person's face
-const headerCoverUrl = computed(
-  () => localCoverUrl.value ?? allMedia.value[0]?.faceCropUrl ?? allMedia.value[0]?.thumbnailUrl ?? null,
-)
+// Resolve the server-designated cover item so detail header matches the index page thumbnail.
+// Person: find the item whose detectionId === representativeDetectionId → use faceCropUrl.
+// Pet:    find the item whose mediaId    === coverMediaId                → use thumbnailUrl.
+// Fall back to the first item if no designated cover is stored yet.
+const serverCoverUrl = computed<string | null>(() => {
+  const subj = subject.value
+  const media = allMedia.value
+  if (!subj || !media.length) return null
+
+  if (subj.type === 'person' && subj.representativeDetectionId != null) {
+    const rep = media.find(m => m.detectionId === subj.representativeDetectionId)
+    if (rep) return rep.faceCropUrl ?? rep.thumbnailUrl ?? null
+  }
+  if (subj.type === 'pet' && subj.coverMediaId) {
+    const cover = media.find(m => m.mediaId === subj.coverMediaId)
+    if (cover) return cover.thumbnailUrl ?? null
+  }
+  // No designated cover — use first item
+  return media[0]?.faceCropUrl ?? media[0]?.thumbnailUrl ?? null
+})
+
+const headerCoverUrl = computed(() => localCoverUrl.value ?? serverCoverUrl.value)
 
 // ── Rename ────────────────────────────────────────────────────────────────────
 
@@ -196,22 +226,26 @@ async function setCover(item: MediaItem) {
   openMenuId.value = null
   if (!subject.value) return
 
-  // Optimistic update — show the face crop for the header (falls back to photo thumbnail)
+  // Optimistic update — show the selected photo immediately
   localCoverUrl.value = item.faceCropUrl ?? item.thumbnailUrl
 
   if (item.detectionId) {
-    // Person: set via detection endpoint → updates representativeDetectionId
+    // Person: mark this detection as the representative → backend sets representative_detection_id
     await $fetch(`/api/v1/subjects/detections/${item.detectionId}`, {
       method: 'PATCH',
-      body: { setCover: true },
+      body: { set_cover: true },
     })
   } else {
-    // Pet: store coverMediaId on the subject
+    // Pet: store cover_media_id on the subject
     await $fetch(`/api/v1/subjects/${subject.value.id}`, {
       method: 'PATCH',
-      body: { coverMediaId: item.mediaId },
+      body: { cover_media_id: item.mediaId },
     })
   }
+  // Refresh so serverCoverUrl resolves from the newly persisted cover fields
+  await refresh()
+  // Clear the optimistic URL — serverCoverUrl will now resolve correctly
+  localCoverUrl.value = null
 }
 
 // Close menu when clicking outside
@@ -486,7 +520,7 @@ function scoreClass(item: MediaItem): string {
       <section class="spap-section spap-section-confirmed">
         <h2 v-if="reviewItems.length" class="spap-section-title">Confirmed</h2>
 
-        <SimpleGallery :items="confirmedGalleryItems">
+        <SimpleGallery :items="confirmedGalleryItems" gallery-id="people-and-pets">
           <template #selection-actions>
             <!-- Remove from this subject -->
             <button class="pill-action" :title="`Remove from ${subject?.name ?? 'subject'}`" @click="removeSelectedFromSubject">

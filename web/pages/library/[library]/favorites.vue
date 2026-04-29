@@ -69,7 +69,7 @@ const items = computed<MediaItem[]>(() =>
       <p v-if="error" class="favorites-page-error">{{ error.message }}</p>
     </div>
 
-    <SimpleGallery :items="items" :loading="pending && !data?.items.length">
+    <SimpleGallery :items="items" :loading="pending && !data?.items.length" gallery-id="favorites">
       <template #empty>
         <HeartIcon :size="48" class="gallery-empty-icon" />
         <p class="gallery-empty-title">{{ pending ? 'Loading…' : 'No favorites yet' }}</p>

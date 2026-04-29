@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useElementSize, useLocalStorage } from '@vueuse/core'
+import { useElementSize } from '@vueuse/core'
 import { CheckIcon, MinusIcon } from 'lucide-vue-next'
 import type { GallerySection } from '~/composables/useGalleryData'
 
@@ -38,14 +38,12 @@ const {
   galleryMode,
   galleryRowHeight,
   galleryGapPx,
+  showDayGroups,
   selectionMode,
   selectedIds,
   selectAll,
   deselectAll,
 } = useGallery()
-
-// User setting: whether to show day-level sticky headers (Settings → Appearance).
-const showDayGroups = useLocalStorage('gallery-show-day-groups', true)
 
 // ── Hover-reveal logic ────────────────────────────────────────────────────
 // Hovering any header for HOVER_DELAY ms reveals its checkbox without

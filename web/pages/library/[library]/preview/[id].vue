@@ -386,7 +386,7 @@ async function applyTag(tag: TagItem) {
   if (mediaTags_.value.find(t => t.id === tag.id)) { tagInput.value = ''; return }
   await $fetch(`/api/v1/library/${libraryId.value}/tags/${tag.id}/items`, {
     method: 'POST',
-    body:   { mediaIds: [id.value] },
+    body:   { media_ids: [id.value] },
   })
   mediaTags_.value = [...mediaTags_.value, tag]
   tagInput.value   = ''

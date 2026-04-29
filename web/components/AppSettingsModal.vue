@@ -9,13 +9,10 @@ import type { AppTheme } from '~/composables/useAppShell'
 import type { GalleryMode, GallerySize, GalleryGap } from '~/composables/useGallery'
 
 const { settingsOpen, theme, closeSettings, setTheme } = useAppShell()
-const { galleryMode, gallerySize, galleryGap, setMode, setSize, setGap } = useGallery()
+const { galleryMode, gallerySize, galleryGap, showDayGroups, setMode, setSize, setGap, setShowDayGroups } = useGallery()
 
 const { user } = useUserSession()
 const isAdmin = computed(() => !!(user.value as { isAdmin?: boolean } | null)?.isAdmin)
-
-// Day groupings toggle (wired to the same key used by GallerySection)
-const showDayGroups = useLocalStorage('gallery-show-day-groups', true)
 
 // ── AI / Features settings ────────────────────────────────────────────────────
 const aiEnabled              = useLocalStorage('features-ai-enabled',              false)
@@ -293,7 +290,7 @@ const modes: { value: GalleryMode; label: string }[] = [
                         :class="{ 'is-on': showDayGroups }"
                         role="switch"
                         :aria-checked="showDayGroups"
-                        @click="showDayGroups = !showDayGroups"
+                        @click="setShowDayGroups(!showDayGroups)"
                       >
                         <span class="settings-toggle-thumb" />
                       </button>

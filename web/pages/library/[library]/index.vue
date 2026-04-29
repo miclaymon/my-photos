@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArchiveIcon, Trash2Icon, GalleryHorizontalIcon, UploadIcon, LayoutIcon, BookmarkPlusIcon } from 'lucide-vue-next'
+import { ArchiveIcon, Trash2Icon, GalleryHorizontalIcon, UploadIcon, LayoutIcon, BookmarkPlusIcon, HeartIcon, TagIcon, LockIcon } from 'lucide-vue-next'
 
 definePageMeta({ middleware: 'auth', keepalive: true })
 
@@ -58,8 +58,26 @@ async function archiveSelected() {
   await loadLibraryMedia(activeLibraryId.value)
 }
 
+// ── Favorite ──────────────────────────────────────────────────────────────
+async function favoriteSelected() {
+  const ids = Array.from(selectedIds.value)
+  await Promise.all(ids.map(id => $fetch(`/api/v1/media/${id}/favorite`, { method: 'PUT' }).catch(() => {})))
+  showToast(`${ids.length} item${ids.length === 1 ? '' : 's'} added to favorites`, 'success')
+  exitSelectionMode()
+}
+
+// ── Make private ──────────────────────────────────────────────────────────
+async function makePrivateSelected() {
+  const ids = Array.from(selectedIds.value)
+  await Promise.all(ids.map(id => $fetch(`/api/v1/media/${id}/make-private`, { method: 'POST' }).catch(() => {})))
+  exitSelectionMode()
+  await loadLibraryMedia(activeLibraryId.value)
+  showToast(`${ids.length} item${ids.length === 1 ? '' : 's'} moved to Private`, 'success')
+}
+
 // ── Add to album ──────────────────────────────────────────────────────────
 const addToAlbumOpen = ref(false)
+const addTagsOpen    = ref(false)
 const selectedMediaIds = computed(() => Array.from(selectedIds.value))
 
 function handleAddedToAlbum(albumName: string) {
@@ -76,11 +94,20 @@ const isRealEmptyLibrary = computed(() => {
 </script>
 
 <template>
-  <PhotoGallery :sections="sections" :loading="isLoading" title="Photos">
+  <PhotoGallery :sections="sections" :loading="isLoading" title="Photos" gallery-id="photos-and-videos">
 
     <template #selection-actions>
+      <button class="pill-action" title="Add to favorites" @click="favoriteSelected">
+        <HeartIcon :size="14" />
+      </button>
       <button class="pill-action" title="Add to album" @click="addToAlbumOpen = true">
         <BookmarkPlusIcon :size="14" />
+      </button>
+      <button class="pill-action" title="Update tags" @click="addTagsOpen = true">
+        <TagIcon :size="14" />
+      </button>
+      <button class="pill-action" title="Make private" @click="makePrivateSelected">
+        <LockIcon :size="14" />
       </button>
       <button class="pill-action" title="Archive selected" @click="archiveSelected">
         <ArchiveIcon :size="14" />
@@ -115,5 +142,11 @@ const isRealEmptyLibrary = computed(() => {
     v-model:open="addToAlbumOpen"
     :media-ids="selectedMediaIds"
     @added="handleAddedToAlbum"
+  />
+
+  <AppAddTagsModal
+    v-model:open="addTagsOpen"
+    :media-ids="selectedMediaIds"
+    @tagged="exitSelectionMode"
   />
 </template>

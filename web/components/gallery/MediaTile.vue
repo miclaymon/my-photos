@@ -201,6 +201,7 @@ function navigateToPreview(id: string) {
       'is-grid-tile':   gridMode,
       'is-provisional': item.isProvisional,
       'is-drag-source': isDragSource,
+      'selection-mode': selectionMode,
     }"
     :style="{
       width:  width  + 'px',

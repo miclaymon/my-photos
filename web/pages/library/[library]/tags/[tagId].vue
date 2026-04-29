@@ -151,7 +151,7 @@ async function removeFromTag() {
       <p v-if="error" class="tag-detail-error">{{ error.message }}</p>
     </div>
 
-    <SimpleGallery :items="items" :loading="pending && !data?.items.length">
+    <SimpleGallery :items="items" :loading="pending && !data?.items.length" gallery-id="tags">
 
       <template #selection-actions="{ selectedIds: selIds, exitSelectionMode: exit }">
         <button

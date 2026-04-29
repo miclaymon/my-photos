@@ -345,6 +345,36 @@ def permanent_delete(
     return {"ok": True}
 
 
+@router.post("/{media_id}/make-private")
+def make_private(
+    media_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    media = db.query(Media).filter(Media.id == media_id).first()
+    if not media:
+        raise HTTPException(status_code=404, detail="Not found")
+    _check_owner_or_admin(media, current_user)
+    media.is_private = True
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/{media_id}/unmake-private")
+def unmake_private(
+    media_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    media = db.query(Media).filter(Media.id == media_id).first()
+    if not media:
+        raise HTTPException(status_code=404, detail="Not found")
+    _check_owner_or_admin(media, current_user)
+    media.is_private = False
+    db.commit()
+    return {"ok": True}
+
+
 @router.put("/{media_id}/favorite")
 def add_favorite(
     media_id: str,

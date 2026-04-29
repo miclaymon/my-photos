@@ -17,6 +17,7 @@ router = APIRouter()
 class UpdateDetectionBody(BaseModel):
     review_needed: Optional[bool] = None
     subject_id: Optional[str] = None
+    set_cover: bool = False  # when True, mark this detection as the subject's representative
 
 
 class UpdateSubjectBody(BaseModel):
@@ -58,6 +59,10 @@ def update_detection(
         det.review_needed = body.review_needed
     if body.subject_id is not None:
         det.subject_id = body.subject_id
+    if body.set_cover and det.subject_id:
+        subject = db.query(Subject).filter(Subject.id == det.subject_id).first()
+        if subject:
+            subject.representative_detection_id = det.id
 
     db.commit()
     return {"ok": True}

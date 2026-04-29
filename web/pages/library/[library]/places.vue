@@ -20,16 +20,19 @@ const libraryId = computed(() => route.params.library as string)
 
 // ── Mode: index vs. detail ────────────────────────────────────────────────────
 
-const activePlaceId = computed(() => {
+const activePlaceId    = computed(() => {
   const q = route.query.place
   return typeof q === 'string' && q ? q : null
 })
+const activePlaceEntry = ref<PlaceEntry | null>(null)
 
-function openPlace(id: string) {
+function openPlace(id: string, entry: PlaceEntry) {
+  activePlaceEntry.value = entry
   router.push({ query: { place: id } })
 }
 
 function backToIndex() {
+  activePlaceEntry.value = null
   router.push({ query: {} })
 }
 
@@ -203,7 +206,14 @@ async function saveDetailRename() {
 
       <div class="places-detail-title-row">
         <div class="places-detail-pin">
-          <MapPinIcon :size="16" class="places-detail-pin-icon" />
+          <img
+            v-if="activePlaceEntry?.coverUrls[0]"
+            :src="activePlaceEntry.coverUrls[0]"
+            class="places-detail-cover-img"
+            alt=""
+            draggable="false"
+          />
+          <MapPinIcon v-else :size="16" class="places-detail-pin-icon" />
         </div>
 
         <!-- Inline rename for detail view -->
@@ -237,7 +247,7 @@ async function saveDetailRename() {
       <p v-if="detailError" class="places-error">{{ detailError }}</p>
     </div>
 
-    <SimpleGallery :items="detailItems" :loading="detailPending && !detailData">
+    <SimpleGallery :items="detailItems" :loading="detailPending && !detailData" gallery-id="places">
       <template #empty>
         <MapPinIcon :size="48" class="gallery-empty-icon" />
         <p class="gallery-empty-title">{{ detailPending ? 'Loading…' : 'No items here' }}</p>
@@ -278,7 +288,7 @@ async function saveDetailRename() {
         v-for="place in places"
         :key="place.id"
         class="places-card"
-        @click="renamingId !== place.id && openPlace(place.id)"
+        @click="renamingId !== place.id && openPlace(place.id, place)"
       >
         <!-- Cover thumbnail (replaces the old pin icon) -->
         <div class="places-card-cover">
@@ -639,6 +649,14 @@ async function saveDetailRename() {
 }
 
 .places-detail-pin-icon { color: var(--color-text-muted); }
+
+.places-detail-cover-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  border-radius: 7px;
+}
 
 .places-detail-title {
   font-size: 20px;

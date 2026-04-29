@@ -107,7 +107,10 @@ def _serialize_media_item(m: Media) -> dict:
         element can show the first frame; that's the only exception.
     """
     aspect_ratio, width, height = _compute_dimensions(m)
-    taken_at = m.taken_at.isoformat() if isinstance(m.taken_at, datetime) else m.taken_at
+    # Fall back to created_at when EXIF date is absent so the item always lands
+    # in a gallery section (upload day) rather than being silently dropped.
+    date_src = m.taken_at or m.created_at
+    taken_at = date_src.isoformat() if isinstance(date_src, datetime) else date_src
     is_video = m.content_type.startswith("video/")
     has_thumbnail = bool(m.thumbnail_object_key)
 
@@ -119,6 +122,7 @@ def _serialize_media_item(m: Media) -> dict:
         "height": height,
         "aspect_ratio": aspect_ratio,
         "taken_at": taken_at,
+        "created_at": m.created_at.isoformat() if isinstance(m.created_at, datetime) else m.created_at,
         "is_video": is_video,
         "duration_seconds": m.duration_seconds,
         # Full-res src: only for videos without a thumbnail (needed for <video> first-frame)
@@ -207,6 +211,7 @@ def list_library_media(
             LibraryMedia.library_id == library_id,
             Media.deletion_date.is_(None),
             Media.archived_at.is_(None),
+            Media.is_private.is_(False),
         )
     )
 
@@ -541,10 +546,12 @@ def subject_media(
 
     return {
         "subject": {
-            "id":     subj.id,
-            "type":   subj.type,
-            "name":   subj.name,
-            "hidden": subj.hidden,
+            "id":                          subj.id,
+            "type":                        subj.type,
+            "name":                        subj.name,
+            "hidden":                      subj.hidden,
+            "cover_media_id":              subj.cover_media_id,
+            "representative_detection_id": subj.representative_detection_id,
         },
         "media": media_items,
     }
@@ -574,13 +581,18 @@ def list_favorites(
     items = []
     for media in rows:
         taken_at = media.taken_at.isoformat() if isinstance(media.taken_at, datetime) else media.taken_at
+        is_video = (media.content_type or "").startswith("video/")
         items.append({
-            "id": media.id,
-            "original_filename": media.original_filename,
-            "content_type": media.content_type,
-            "thumbnail_url": _presign(media.thumbnail_object_key),
-            "image_url": _presign(media.object_key),
-            "taken_at": taken_at,
+            "id":               media.id,
+            "originalFilename": media.original_filename,
+            "contentType":      media.content_type,
+            "width":            media.width or 0,
+            "height":           media.height or 0,
+            "aspectRatio":      media.aspect_ratio or 1.5,
+            "isVideo":          is_video,
+            "takenAt":          taken_at,
+            "thumbnailSrc":     _presign(media.thumbnail_object_key),
+            "src":              _presign(media.object_key) if is_video and not media.thumbnail_object_key else None,
         })
 
     return {"items": items}
@@ -1013,6 +1025,47 @@ def list_archive(
             "archivedAt": archived_at,
             "thumbnailSrc": _presign(media.thumbnail_object_key),
             "src": _presign(media.object_key),
+        })
+
+    return {"items": items}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/library/{library_id}/private
+# ---------------------------------------------------------------------------
+
+@router.get("/{library_id}/private")
+def list_private(
+    library_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rows = (
+        db.query(Media)
+        .join(LibraryMedia, LibraryMedia.media_id == Media.id)
+        .filter(
+            LibraryMedia.library_id == library_id,
+            Media.is_private.is_(True),
+            Media.deletion_date.is_(None),
+        )
+        .order_by(desc(Media.taken_at), desc(Media.created_at))
+        .all()
+    )
+
+    items = []
+    for media in rows:
+        taken_at = media.taken_at.isoformat() if isinstance(media.taken_at, datetime) else media.taken_at
+        items.append({
+            "id": media.id,
+            "originalFilename": media.original_filename,
+            "contentType": media.content_type,
+            "width": media.width or 0,
+            "height": media.height or 0,
+            "aspectRatio": media.aspect_ratio or 1.5,
+            "isVideo": (media.content_type or "").startswith("video/"),
+            "takenAt": taken_at,
+            "thumbnailSrc": _presign(media.thumbnail_object_key),
+            "src": _presign(media.object_key) if (media.content_type or "").startswith("video/") and not media.thumbnail_object_key else None,
         })
 
     return {"items": items}

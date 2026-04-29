@@ -1072,7 +1072,7 @@ html, body {
 /* Show checkbox on tile hover, when selected, or when selection mode is active */
 .media-tile:hover .media-tile-checkbox,
 .media-tile.is-selected .media-tile-checkbox,
-.selection-mode .media-tile .media-tile-checkbox {
+.media-tile.selection-mode .media-tile-checkbox {
   opacity: 1;
 }
 

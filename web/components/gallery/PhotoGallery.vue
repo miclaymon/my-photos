@@ -1,23 +1,41 @@
 <script setup lang="ts">
 import { LayoutGridIcon, LayoutIcon } from 'lucide-vue-next'
 import type { GallerySection } from '~/composables/useGalleryData'
+import { GALLERY_CONFIG_KEY, useGalleryConfig, registerActiveGalleryConfig, unregisterActiveGalleryConfig } from '~/composables/useGallery'
+import type { GalleryMode, GallerySize } from '~/composables/useGallery'
 
 const props = withDefaults(defineProps<{
   sections:          ReadonlyArray<GallerySection>
+  galleryId?:        string
   title?:            string
   loading?:          boolean
   /** Set false to hide the masonry/grid toggle (e.g. album detail, search). Default: true. */
   showModeToggle?:   boolean
   /** Set false to suppress year/month group boundary headers inside sections. Default: true. */
   showGroupHeaders?: boolean
+  /** Initial mode for first-time visitors (can still be changed and saved). */
+  defaultMode?:      GalleryMode
+  /** Initial size for first-time visitors (can still be changed and saved). */
+  defaultSize?:      GallerySize
 }>(), {
+  galleryId:        'default',
   title:            'Photos',
   loading:          false,
   showModeToggle:   true,
   showGroupHeaders: true,
 })
 
-const { galleryMode, selectionMode, setMode } = useGallery()
+const config = useGalleryConfig(props.galleryId, {
+  ...(props.defaultMode ? { mode: props.defaultMode } : {}),
+  ...(props.defaultSize ? { size: props.defaultSize } : {}),
+})
+provide(GALLERY_CONFIG_KEY, config)
+
+const { galleryMode, setMode } = config
+const { selectionMode, exitSelectionMode } = useGallery()
+
+onMounted(()   => registerActiveGalleryConfig(config))
+onUnmounted(() => { unregisterActiveGalleryConfig(config); exitSelectionMode() })
 
 // Track when the gallery header (title + inline toggle) has scrolled out of view
 const galleryHeaderRef = ref<HTMLElement | null>(null)
@@ -26,12 +44,17 @@ const modeFloating     = ref(false)
 onMounted(() => {
   const root = document.getElementById('main-content')
   if (!root || !galleryHeaderRef.value) return
-  const obs = new IntersectionObserver(
-    ([entry]) => { modeFloating.value = !entry!.isIntersecting },
-    { root, threshold: 0 },
-  )
-  obs.observe(galleryHeaderRef.value)
-  onUnmounted(() => obs.disconnect())
+  // nextTick: skip any transient "not intersecting" fire that can happen
+  // while the View Transitions API is painting the incoming page.
+  nextTick(() => {
+    if (!galleryHeaderRef.value) return
+    const obs = new IntersectionObserver(
+      ([entry]) => { modeFloating.value = !entry!.isIntersecting },
+      { root, threshold: 0 },
+    )
+    obs.observe(galleryHeaderRef.value)
+    onUnmounted(() => obs.disconnect())
+  })
 })
 </script>
 

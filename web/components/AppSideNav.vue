@@ -29,7 +29,7 @@ const navItems = computed(() => {
     { label: 'People & Pets',   href: base ? `${base}/people-and-pets` : null, icon: PeopleIcon,     disabled: false, hasSubmenu: false },
     { label: 'Places',          href: base ? `${base}/places` : null,          icon: MapPinIcon,     disabled: false, hasSubmenu: false },
     { label: 'Tags',            href: base ? `${base}/tags` : null,            icon: TagIcon,        disabled: false, hasSubmenu: false },
-    { label: 'Private',         href: base ? `${base}/private` : null,         icon: LockIcon,       disabled: true,  hasSubmenu: false },
+    { label: 'Private',         href: base ? `${base}/private` : null,         icon: LockIcon,       disabled: false, hasSubmenu: false },
     { label: 'Archive',         href: base ? `${base}/archive` : null,         icon: ArchiveIcon,    disabled: false, hasSubmenu: false },
     { label: 'Trash',           href: base ? `${base}/trash` : null,           icon: Trash2Icon,     disabled: false, hasSubmenu: false },
   ]
@@ -56,7 +56,7 @@ interface AlbumEntry { id: string; name: string }
 
 const albumMenuOpen  = ref(false)
 const albumMenuPos   = ref({ top: 0, left: 0 })
-const albumCaretRef  = ref<HTMLElement | null>(null)
+const albumCaretRef  = shallowRef<HTMLElement | null>(null)
 const albumMenuRef   = ref<HTMLElement | null>(null)
 const recentAlbums   = ref<AlbumEntry[]>([])
 const albumsLoaded   = ref(false)
@@ -154,7 +154,7 @@ function selectAlbum(albumId: string) {
             </NuxtLink>
             <button
               v-show="sideNavOpen"
-              ref="albumCaretRef"
+              :ref="(el) => { albumCaretRef = el as HTMLElement | null }"
               class="sidenav-item-caret"
               :class="{ 'is-open': albumMenuOpen }"
               :aria-label="`Recent ${item.label}`"

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { PencilIcon, CheckIcon, XIcon, Trash2Icon, ImageIcon, GripVerticalIcon } from 'lucide-vue-next'
+import type { MediaItem } from '~/composables/useGalleryData'
 
 definePageMeta({ middleware: 'auth', keepalive: false })
 
@@ -260,6 +261,21 @@ const coverUrl = computed(() =>
 
 // View transition name must match the AlbumCard's name for the animation to work
 const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
+
+// Flat MediaItem list for the SimpleGallery view mode (preserves album sort order)
+const galleryItems = computed<MediaItem[]>(() =>
+  localItems.value.map(item => ({
+    id:               item.mediaId,
+    originalFilename: item.originalFilename,
+    aspectRatio:      item.aspectRatio || 1,
+    width:            item.width  || 0,
+    height:           item.height || 0,
+    takenAt:          item.takenAt || new Date().toISOString(),
+    isVideo:          item.isVideo,
+    thumbnailSrc:     item.thumbnailSrc ?? undefined,
+    src:              item.src ?? undefined,
+  })),
+)
 </script>
 
 <template>
@@ -339,15 +355,23 @@ const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
         </div>
       </div>
 
-      <!-- ── Empty album ────────────────────────────────────────────────── -->
-      <div v-if="!localItems.length" class="album-empty">
-        <ImageIcon :size="40" class="album-empty-icon" />
-        <p class="album-empty-title">This album is empty</p>
-        <p class="album-empty-body">Add photos from your library to get started.</p>
-      </div>
+      <!-- ── View mode: reusable gallery ──────────────────────────────────── -->
+      <SimpleGallery
+        v-if="!editMode"
+        :items="galleryItems"
+        :loading="loading"
+        :gallery-id="`album-${albumId}`"
+        forced-mode="grid"
+      >
+        <template #empty>
+          <ImageIcon :size="40" class="gallery-empty-icon" />
+          <p class="gallery-empty-title">This album is empty</p>
+          <p class="gallery-empty-body">Add photos from your library to get started.</p>
+        </template>
+      </SimpleGallery>
 
-      <!-- ── Item grid ──────────────────────────────────────────────────── -->
-      <div v-else class="album-grid" :class="{ 'is-edit': editMode }">
+      <!-- ── Edit mode: drag-reorder grid ──────────────────────────────────── -->
+      <div v-else class="album-grid is-edit">
         <div
           v-for="(item, index) in localItems"
           :key="item.id"
@@ -356,22 +380,18 @@ const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
             'is-dragging':    isDragging(index),
             'is-drop-target': isDropTarget(index),
           }"
-          :draggable="editMode"
-          @dragstart="editMode && onDragStart($event, index)"
-          @dragenter="editMode && onDragEnter($event, index)"
-          @dragover="editMode && onDragOver($event)"
-          @drop="editMode && onDrop($event, index)"
+          draggable="true"
+          @dragstart="onDragStart($event, index)"
+          @dragenter="onDragEnter($event, index)"
+          @dragover="onDragOver($event)"
+          @drop="onDrop($event, index)"
           @dragend="onDragEnd"
         >
           <!-- Photo / thumbnail -->
-          <div
-            class="album-item-cover"
-            :class="{ 'is-clickable': !editMode }"
-            @click="!editMode && router.push(`/library/${libraryId}/preview/${item.mediaId}`)"
-          >
+          <div class="album-item-cover">
             <img
               v-if="item.thumbnailSrc || item.src"
-              :src="(item.isVideo ? item.thumbnailSrc : item.src) ?? item.src ?? ''"
+              :src="item.thumbnailSrc ?? item.src ?? ''"
               :alt="item.originalFilename"
               class="album-item-thumb"
               loading="lazy"
@@ -381,39 +401,32 @@ const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
               <ImageIcon :size="24" />
             </div>
 
-            <!-- Video badge -->
             <span v-if="item.isVideo" class="album-item-video-badge">▶</span>
 
-            <!-- Edit-mode overlays -->
-            <template v-if="editMode">
-              <!-- Drag handle indicator (top-left) -->
-              <div class="album-item-drag-handle">
-                <GripVerticalIcon :size="14" />
-              </div>
+            <div class="album-item-drag-handle">
+              <GripVerticalIcon :size="14" />
+            </div>
 
-              <!-- Remove button -->
-              <button
-                class="album-item-remove"
-                title="Remove from album"
-                @click.stop="removeItem(item)"
-              >
-                <XIcon :size="12" />
-              </button>
+            <button
+              class="album-item-remove"
+              title="Remove from album"
+              @click.stop="removeItem(item)"
+            >
+              <XIcon :size="12" />
+            </button>
 
-              <!-- Set as cover -->
-              <button
-                class="album-item-set-cover"
-                title="Set as album cover"
-                @click.stop="setCover(item)"
-              >
-                <ImageIcon :size="12" />
-              </button>
-            </template>
+            <button
+              class="album-item-set-cover"
+              title="Set as album cover"
+              @click.stop="setCover(item)"
+            >
+              <ImageIcon :size="12" />
+            </button>
           </div>
 
           <!-- Caption -->
           <div class="album-item-caption-wrap">
-            <template v-if="editMode && editingCaptionId === item.id">
+            <template v-if="editingCaptionId === item.id">
               <textarea
                 v-model="captionDraft"
                 class="album-item-caption-input"
@@ -426,12 +439,11 @@ const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
             </template>
             <template v-else>
               <p
-                v-if="item.caption || editMode"
                 class="album-item-caption"
                 :class="{ 'is-placeholder': !item.caption }"
-                @click="editMode && startCaptionEdit(item)"
+                @click="startCaptionEdit(item)"
               >
-                {{ item.caption ?? (editMode ? 'Add a caption…' : '') }}
+                {{ item.caption ?? 'Add a caption…' }}
               </p>
             </template>
           </div>
@@ -632,23 +644,18 @@ const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
   margin: 0;
 }
 
-/* ── Item grid ────────────────────────────────────────────────────────────── */
-.album-grid {
+/* ── Edit-mode item grid ──────────────────────────────────────────────────── */
+.album-grid.is-edit {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 4px;
+  gap: 10px;
   padding: 8px 24px 48px;
 }
 
 @media (min-width: 768px) {
-  .album-grid {
+  .album-grid.is-edit {
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 6px;
   }
-}
-
-.album-grid.is-edit {
-  gap: 10px;
 }
 
 /* ── Item ─────────────────────────────────────────────────────────────────── */
@@ -674,14 +681,8 @@ const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
   border-radius: 6px;
 }
 
-/* In edit mode, show cursor affordance */
-.album-grid.is-edit .album-item {
-  cursor: grab;
-}
-
-.album-grid.is-edit .album-item:active {
-  cursor: grabbing;
-}
+.album-grid.is-edit .album-item { cursor: grab; }
+.album-grid.is-edit .album-item:active { cursor: grabbing; }
 
 /* ── Item cover ───────────────────────────────────────────────────────────── */
 .album-item-cover {
@@ -691,8 +692,6 @@ const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
   border-radius: 6px;
   background: var(--color-surface-raised);
 }
-
-.album-item-cover.is-clickable { cursor: pointer; }
 
 .album-item-thumb {
   width: 100%;
@@ -747,9 +746,7 @@ const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
   pointer-events: none;
 }
 
-.album-grid.is-edit .album-item:hover .album-item-drag-handle {
-  opacity: 1;
-}
+.album-grid.is-edit .album-item:hover .album-item-drag-handle { opacity: 1; }
 
 .album-item-remove,
 .album-item-set-cover {
@@ -773,9 +770,7 @@ const coverTransitionName = computed(() => `album-cover-${albumId.value}`)
 .album-item-set-cover { bottom: 5px; right: 5px; }
 
 .album-grid.is-edit .album-item:hover .album-item-remove,
-.album-grid.is-edit .album-item:hover .album-item-set-cover {
-  opacity: 1;
-}
+.album-grid.is-edit .album-item:hover .album-item-set-cover { opacity: 1; }
 
 .album-item-remove:hover { background: rgba(220,38,38,0.7); }
 .album-item-set-cover:hover { background: rgba(59,130,246,0.65); }

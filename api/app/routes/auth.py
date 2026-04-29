@@ -54,6 +54,20 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class VerifyPasswordRequest(BaseModel):
+    password: str
+
+
+@router.post("/verify")
+def verify_current_password(
+    body: VerifyPasswordRequest,
+    current_user: User = Depends(get_current_user),
+):
+    if not verify_password(body.password, current_user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password")
+    return {"ok": True}
+
+
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
     payload = decode_refresh_token(body.refresh_token)

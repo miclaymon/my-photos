@@ -32,6 +32,7 @@ class Media(Base):
     # Lifecycle
     archived_at:          Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deletion_date:        Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_private:           Mapped[bool]            = mapped_column(nullable=False, server_default='false')
     # Background processing timestamps (null = not yet processed)
     objects_processed_at:  Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     faces_processed_at:    Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

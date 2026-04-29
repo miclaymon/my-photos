@@ -85,7 +85,7 @@ async function unarchiveSelected() {
       <p v-if="error" class="archive-page-error">{{ error.message }}</p>
     </div>
 
-    <SimpleGallery :items="items" :loading="pending && !data?.items.length">
+    <SimpleGallery :items="items" :loading="pending && !data?.items.length" gallery-id="archive" forced-mode="grid" forced-size="xs">
 
       <template #selection-actions>
         <button class="pill-action" title="Unarchive selected" @click="unarchiveSelected">
