@@ -13,6 +13,7 @@
     "@nuxt/fonts": "^0.14.0",
     "@nuxt/image": "^1.10.0",
     "@nuxtjs/tailwindcss": "^6.13.2",
+    "@vite-pwa/nuxt": "^1.1.1",
     "@vueuse/core": "^14.2.1",
     "exifreader": "^4.38.1",
     "lucide-vue-next": "^1.0.0",

@@ -424,6 +424,54 @@ def delete_pending_jobs(
     return {"deleted": deleted}
 
 
+@router.get("/jobs/recent")
+def recent_jobs(
+    limit: int = Query(100, le=500),
+    job_type: Optional[str] = Query(None),
+    library_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Return the most recent BackgroundJob records with timing info."""
+    q = db.query(BackgroundJob).order_by(BackgroundJob.created_at.desc())
+
+    if job_type:
+        q = q.filter(BackgroundJob.type == job_type)
+
+    if library_id:
+        media_in_library = [
+            r.media_id for r in db.query(LibraryMedia.media_id).filter(
+                LibraryMedia.library_id == library_id
+            ).all()
+        ]
+        q = q.filter(BackgroundJob.media_id.in_(media_in_library))
+
+    jobs = q.limit(limit).all()
+
+    def duration_ms(job: BackgroundJob) -> int | None:
+        if job.started_at and job.completed_at:
+            return int((job.completed_at - job.started_at).total_seconds() * 1000)
+        return None
+
+    return {
+        "jobs": [
+            {
+                "id":           j.id,
+                "type":         j.type,
+                "status":       j.status,
+                "media_id":     j.media_id,
+                "error":        j.error,
+                "batch_id":     j.batch_id,
+                "created_at":   j.created_at.isoformat() if j.created_at else None,
+                "started_at":   j.started_at.isoformat() if j.started_at else None,
+                "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+                "duration_ms":  duration_ms(j),
+            }
+            for j in jobs
+        ]
+    }
+
+
 @router.post("/subjects/reset")
 def reset_subjects(
     body: ResetSubjectsBody,

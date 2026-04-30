@@ -145,6 +145,8 @@ function onMouseDown(e: MouseEvent) {
 }
 
 function handleClick(e: MouseEvent | KeyboardEvent) {
+  // Provisional items are still uploading — not navigable
+  if (props.item.isProvisional) return
   // If mouse was dragged past the threshold, don't also fire click logic
   if (wasDragConsumed()) return
   // Shift+click: range-select (works even when NOT in selection mode)
@@ -200,6 +202,7 @@ function navigateToPreview(id: string) {
       'is-selected':    selected,
       'is-grid-tile':   gridMode,
       'is-provisional': item.isProvisional,
+      'no-thumbnail':   item.isProvisional && !imgSrc,
       'is-drag-source': isDragSource,
       'selection-mode': selectionMode,
     }"
@@ -276,12 +279,6 @@ function navigateToPreview(id: string) {
         aria-hidden="true"
       />
 
-      <!-- Provisional overlay: pulsing shimmer + spinner while upload is processing -->
-      <div v-if="item.isProvisional" class="media-tile-provisional" aria-hidden="true">
-        <svg class="media-tile-provisional-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-        </svg>
-      </div>
 
       <!-- Selection checkbox -->
       <div

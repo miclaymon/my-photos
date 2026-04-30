@@ -6,18 +6,33 @@ definePageMeta({ middleware: 'auth', keepalive: true })
 const route   = useRoute()
 const router  = useRouter()
 const { setActiveLibrary, activeLibraryId } = useAppShell()
-const { sections, isLoading, loadLibraryMedia } = useGalleryData()
+const {
+  sections, isLoading,
+  hasMoreOlder, hasMoreNewer, isLoadingOlder, isLoadingNewer,
+  initGallery, loadOlderMedia, loadNewerMedia, removeItems,
+} = useGalleryData()
 const { activeStickyKey, mountScrollTracking, unmountScrollTracking, recompute } = useActiveStickySection()
 const { libraries }                         = useLibraries()
 const { addFiles }                          = useUpload()
 const { selectedIds, exitSelectionMode }    = useGallery()
 const { showToast }                         = useToast()
 
+// Only use the URL hash as an anchor on the very first load (page open / refresh).
+// On subsequent library switches, always load from newest so we don't teleport
+// the user to an unrelated date from a previously-viewed library.
+let _isFirstLoad = true
+
 // Sync URL param → active library state; reload real media when library changes
 const librarySlug = computed(() => route.params.library as string)
 watch(librarySlug, (id) => {
   setActiveLibrary(id)
-  loadLibraryMedia(id)
+  if (_isFirstLoad) {
+    _isFirstLoad = false
+    const anchorDate = route.hash?.match(/^#(\d{4}-\d{2}-\d{2})$/)?.[1] ?? undefined
+    initGallery(id, anchorDate)
+  } else {
+    initGallery(id)
+  }
 }, { immediate: true })
 
 // ── Scroll tracking + date hash ───────────────────────────────────────────
@@ -43,19 +58,28 @@ watch(activeStickyKey, (key) => {
   if (route.hash !== newHash) router.replace({ hash: newHash })
 })
 
+// ── Infinite scroll handlers ──────────────────────────────────────────────
+function handleLoadOlder() {
+  if (hasMoreOlder.value && !isLoadingOlder.value) loadOlderMedia(activeLibraryId.value)
+}
+
+function handleLoadNewer() {
+  if (hasMoreNewer.value && !isLoadingNewer.value) loadNewerMedia(activeLibraryId.value)
+}
+
 // ── Selection actions ─────────────────────────────────────────────────────
 async function trashSelected() {
   const ids = Array.from(selectedIds.value)
   await Promise.all(ids.map(id => $fetch(`/api/v1/media/${id}/soft-delete`, { method: 'POST' }).catch(() => {})))
+  removeItems(ids)
   exitSelectionMode()
-  await loadLibraryMedia(activeLibraryId.value)
 }
 
 async function archiveSelected() {
   const ids = Array.from(selectedIds.value)
   await Promise.all(ids.map(id => $fetch(`/api/v1/media/${id}/archive`, { method: 'POST' }).catch(() => {})))
+  removeItems(ids)
   exitSelectionMode()
-  await loadLibraryMedia(activeLibraryId.value)
 }
 
 // ── Favorite ──────────────────────────────────────────────────────────────
@@ -70,8 +94,8 @@ async function favoriteSelected() {
 async function makePrivateSelected() {
   const ids = Array.from(selectedIds.value)
   await Promise.all(ids.map(id => $fetch(`/api/v1/media/${id}/make-private`, { method: 'POST' }).catch(() => {})))
+  removeItems(ids)
   exitSelectionMode()
-  await loadLibraryMedia(activeLibraryId.value)
   showToast(`${ids.length} item${ids.length === 1 ? '' : 's'} moved to Private`, 'success')
 }
 
@@ -94,7 +118,18 @@ const isRealEmptyLibrary = computed(() => {
 </script>
 
 <template>
-  <PhotoGallery :sections="sections" :loading="isLoading" title="Photos" gallery-id="photos-and-videos">
+  <PhotoGallery
+    :sections="sections"
+    :loading="isLoading"
+    :has-more-older="hasMoreOlder"
+    :has-more-newer="hasMoreNewer"
+    :loading-older="isLoadingOlder"
+    :loading-newer="isLoadingNewer"
+    title="Photos"
+    gallery-id="photos-and-videos"
+    @load-older="handleLoadOlder"
+    @load-newer="handleLoadNewer"
+  >
 
     <template #selection-actions>
       <button class="pill-action" title="Add to favorites" @click="favoriteSelected">

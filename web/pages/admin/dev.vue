@@ -45,6 +45,7 @@ interface BucketGroup {
   prefix:       string
   mainObject:   BucketObject | null
   thumbObject:  BucketObject | null
+  faceObjects:  BucketObject[]
   extras:       BucketObject[]
   totalSize:    number
   lastModified: string | null
@@ -116,7 +117,7 @@ async function fetchBucketObjects() {
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
-const tab = ref<'media' | 'bucket' | 'libraries' | 'jobs'>('media')
+const tab = ref<'media' | 'bucket' | 'libraries' | 'jobs' | 'uploads'>('media')
 
 // ── Trash cleanup ──────────────────────────────────────────────────────────────
 
@@ -430,22 +431,78 @@ async function fetchJobStatuses() {
   } catch { /* ignore */ }
 }
 
+// ── Recent jobs ───────────────────────────────────────────────────────────────
+
+interface RecentJob {
+  id:           string
+  type:         string
+  status:       string
+  media_id:     string
+  error:        string | null
+  batch_id:     string | null
+  created_at:   string | null
+  started_at:   string | null
+  completed_at: string | null
+  duration_ms:  number | null
+}
+
+const recentJobs        = ref<RecentJob[]>([])
+const recentJobsPending = ref(false)
+const recentJobsExpanded = ref(false)
+
+async function fetchRecentJobs() {
+  recentJobsPending.value = true
+  try {
+    const query: Record<string, string> = {}
+    if (jobLibraryId.value) query.library_id = jobLibraryId.value
+    const res = await $fetch<{ jobs: RecentJob[] }>('/api/v1/admin/jobs/recent', { query })
+    recentJobs.value = res.jobs
+  } catch { /* ignore */ }
+  finally { recentJobsPending.value = false }
+}
+
+function fmtDuration(ms: number | null): string {
+  if (ms === null) return '—'
+  if (ms < 1000)   return `${ms}ms`
+  if (ms < 60000)  return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`
+}
+
+function fmtTimestamp(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
 let _jobPoller: ReturnType<typeof setInterval> | null = null
 
 watch(tab, (t) => {
-  if (t === 'bucket') {
-    fetchBucketObjects()
-  }
+  if (t === 'bucket') fetchBucketObjects()
+
   if (t === 'jobs') {
     fetchJobStatuses()
+    fetchRecentJobs()
     _jobPoller = setInterval(() => {
       const s = jobStatuses.value
       if (s && Object.values(s).some(j => j.pending > 0 || j.running > 0)) {
         fetchJobStatuses()
+        fetchRecentJobs()
       }
     }, 3000)
   } else {
     if (_jobPoller) { clearInterval(_jobPoller); _jobPoller = null }
+  }
+
+  if (t === 'uploads') {
+    refreshSwJobs()
+    _swPoller = setInterval(() => {
+      const hasActive = swJobs.value.some(
+        j => j.status !== 'done' && j.status !== 'error' && j.status !== 'skipped',
+      )
+      if (hasActive) refreshSwJobs()
+    }, 2000)
+  } else {
+    if (_swPoller) { clearInterval(_swPoller); _swPoller = null }
   }
 })
 
@@ -646,6 +703,10 @@ function isThumbKey(key: string): boolean {
   return name === 'thumb.jpg' || name.startsWith('thumb.')
 }
 
+function isFaceKey(key: string): boolean {
+  return key.includes('/faces/')
+}
+
 function shortGroupPrefix(prefix: string): string {
   const parts = prefix.split('/')
   if (parts.length >= 3) return `${parts[0]}/${parts[1].slice(0, 8)}…/`
@@ -672,15 +733,16 @@ const bucketGroups = computed((): BucketGroup[] => {
 
   return Array.from(groupMap.entries()).map(([prefix, objs]) => {
     const thumbObject  = objs.find(o => isThumbKey(o.key)) ?? null
-    const mainObject   = objs.find(o => !isThumbKey(o.key)) ?? null
-    const extras       = objs.filter(o => o !== thumbObject && o !== mainObject)
+    const faceObjects  = objs.filter(o => isFaceKey(o.key))
+    const mainObject   = objs.find(o => !isThumbKey(o.key) && !isFaceKey(o.key)) ?? null
+    const extras       = objs.filter(o => o !== thumbObject && o !== mainObject && !faceObjects.includes(o))
     const totalSize    = objs.reduce((s, o) => s + o.size, 0)
     const lastModified = objs.reduce<string | null>((latest, o) => {
       if (!o.last_modified) return latest
       return !latest || o.last_modified > latest ? o.last_modified : latest
     }, null)
     return {
-      prefix, mainObject, thumbObject, extras, totalSize, lastModified,
+      prefix, mainObject, thumbObject, faceObjects, extras, totalSize, lastModified,
       isOrphan: !mainObject || !dbKeys.has(mainObject.key),
     }
   })
@@ -834,6 +896,96 @@ async function confirmBulkDeleteBucket() {
   }
 }
 
+// ── SW Upload Jobs ────────────────────────────────────────────────────────────
+
+interface SwJobSummary {
+  id:                  string
+  filename:            string
+  status:              string
+  progress:            number
+  error?:              string
+  objectKey?:          string
+  mediaId?:            string
+  createdAt:           number
+  libraryIds:          string[]
+  hash?:               string
+  takenAt?:            string | null
+  conflictResolution?: string
+}
+
+const swJobs        = ref<SwJobSummary[]>([])
+const swJobsLoading = ref(false)
+
+let _swChannel: BroadcastChannel | null = null
+let _swPoller:  ReturnType<typeof setInterval> | null = null
+
+function getSwChannel(): BroadcastChannel {
+  if (!_swChannel && import.meta.client) {
+    _swChannel = new BroadcastChannel('upload')
+    _swChannel.addEventListener('message', (e: MessageEvent) => {
+      const msg = e.data as { type: string; jobs?: SwJobSummary[] }
+      if (msg.type === 'STATE_SYNC' && Array.isArray(msg.jobs)) {
+        swJobs.value        = (msg.jobs as SwJobSummary[]).slice().sort((a, b) => b.createdAt - a.createdAt)
+        swJobsLoading.value = false
+      }
+    })
+  }
+  return _swChannel!
+}
+
+function refreshSwJobs() {
+  if (!import.meta.client) return
+  swJobsLoading.value = true
+  getSwChannel().postMessage({ type: 'GET_STATE_RAW' })
+  setTimeout(() => { swJobsLoading.value = false }, 3000)
+}
+
+function clearSwDone() {
+  getSwChannel().postMessage({ type: 'CLEAR_DONE' })
+  setTimeout(refreshSwJobs, 150)
+}
+
+function retrySwJob(id: string) {
+  getSwChannel().postMessage({ type: 'RETRY_JOB', id })
+  const job = swJobs.value.find(j => j.id === id)
+  if (job) { job.status = 'queued'; job.error = undefined; job.progress = 0 }
+  setTimeout(refreshSwJobs, 300)
+}
+
+function cancelSwJob(id: string) {
+  getSwChannel().postMessage({ type: 'CANCEL_JOB', id })
+  swJobs.value = swJobs.value.filter(j => j.id !== id)
+}
+
+function viewSwJobInBucket(objectKey: string) {
+  tab.value          = 'bucket'
+  bucketFilter.value = objectKey.split('/').slice(0, 2).join('/')
+  if (!bucketData.value) fetchBucketObjects()
+}
+
+function swBadgeClass(status: string): string {
+  if (status === 'done')                           return 'done'
+  if (status === 'error')                          return 'error'
+  if (status === 'skipped')                        return 'skipped'
+  if (status === 'uploading' || status === 'notifying') return 'active'
+  if (status === 'conflict')                       return 'conflict'
+  return 'pending'
+}
+
+function swRelativeTime(ts: number): string {
+  const diff = Date.now() - ts
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1)  return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24)  return `${hrs}h ago`
+  return new Date(ts).toLocaleDateString()
+}
+
+const swHasClearable = computed(() =>
+  swJobs.value.some(j => j.status === 'done' || j.status === 'error' || j.status === 'skipped'),
+)
+
 // ── Watches ────────────────────────────────────────────────────────────────────
 
 watch(mediaFilter,    () => { mediaPage.value = 1 })
@@ -884,19 +1036,28 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
       <!-- Tabs -->
       <div class="dev-admin-tabs">
         <button
-          v-for="t in (['media', 'bucket', 'libraries', 'jobs'] as const)"
+          v-for="t in (['media', 'bucket', 'libraries', 'jobs', 'uploads'] as const)"
           :key="t"
           class="dev-admin-tab"
           :class="{ 'is-active': tab === t }"
           @click="tab = t"
         >
-          {{ t === 'media' ? 'DB Media' : t === 'bucket' ? 'Bucket Objects' : t === 'libraries' ? 'Libraries' : 'Background Jobs' }}
+          <template v-if="t === 'media'">DB Media</template>
+          <template v-else-if="t === 'bucket'">Bucket Objects</template>
+          <template v-else-if="t === 'libraries'">Libraries</template>
+          <template v-else-if="t === 'jobs'">Background Jobs</template>
+          <template v-else>
+            SW Uploads
+            <span v-if="t === 'uploads' && swJobs.some(j => j.status !== 'done' && j.status !== 'skipped')" class="dev-tab-badge">
+              {{ swJobs.filter(j => j.status !== 'done' && j.status !== 'skipped').length }}
+            </span>
+          </template>
         </button>
       </div>
     </div>
 
-    <!-- Error / Loading states for the overview (only shown for non-bucket tabs) -->
-    <template v-if="tab !== 'bucket'">
+    <!-- Error / Loading states for the overview (only shown for DB-backed tabs) -->
+    <template v-if="tab !== 'bucket' && tab !== 'uploads'">
       <div v-if="error" class="dev-admin-error">
         <strong>Error:</strong> {{ error.message }}
         <span v-if="error.statusCode === 401" style="display:block;margin-top:6px;font-size:12px;color:var(--color-text-muted)">
@@ -1148,6 +1309,7 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
                     <code class="dev-object-key">{{ shortGroupPrefix(group.prefix) }}</code>
                     <span class="dev-bucket-main-filename">{{ groupMainFilename(group) }}</span>
                     <span v-if="group.thumbObject" class="dev-bucket-has-thumb">+ thumb</span>
+                    <span v-if="group.faceObjects.length" class="dev-bucket-has-thumb" style="color:#a78bfa">+ {{ group.faceObjects.length }} face{{ group.faceObjects.length === 1 ? '' : 's' }}</span>
                     <span v-if="group.extras.length" class="dev-muted" style="font-size:10px"> +{{ group.extras.length }} more</span>
                   </td>
                   <td class="dev-mono">{{ formatBytes(group.totalSize) }}</td>
@@ -1173,6 +1335,28 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
                   <td class="dev-mono">{{ formatBytes(group.thumbObject.size) }}</td>
                   <td class="dev-mono">{{ relativeTime(group.thumbObject.last_modified) }}</td>
                   <td><span class="dev-muted" style="font-size:10px">thumbnail</span></td>
+                  <td></td>
+                </tr>
+                <!-- Face crop sub-rows -->
+                <tr
+                  v-for="face in (bucketShowThumbs ? group.faceObjects : [])"
+                  :key="face.key"
+                  class="dev-bucket-child-row"
+                >
+                  <td></td>
+                  <td class="dev-table-thumb-cell">
+                    <button v-if="face.src" class="dev-thumb-btn" @click="previewSrc = face.src">
+                      <img :src="face.src" class="dev-thumb lazy-img" style="border-radius:50%;object-fit:cover" @load="(e) => (e.target as HTMLImageElement).classList.add('is-loaded')" />
+                    </button>
+                    <span v-else class="dev-thumb-placeholder">—</span>
+                  </td>
+                  <td>
+                    <span class="dev-bucket-child-indent">↳</span>
+                    <code class="dev-object-key" style="display:inline">{{ face.key.split('/').pop() }}</code>
+                  </td>
+                  <td class="dev-mono">{{ formatBytes(face.size) }}</td>
+                  <td class="dev-mono">{{ relativeTime(face.last_modified) }}</td>
+                  <td><span class="dev-muted" style="font-size:10px;color:#a78bfa">face crop</span></td>
                   <td></td>
                 </tr>
               </template>
@@ -1412,6 +1596,207 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
           {{ reclusterPending ? 'Re-clustering…' : 'Re-cluster subjects' }}
         </button>
         <p v-if="reclusterResult" class="dev-reset-result">{{ reclusterResult }}</p>
+      </div>
+
+      <!-- ── Recent jobs table ─────────────────────────────────────────────── -->
+      <div class="dev-reset-section">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+          <h3 class="dev-reset-title" style="margin-bottom:0">Recent Jobs</h3>
+          <button class="dev-btn dev-btn-ghost" style="font-size:11px;padding:4px 10px" :disabled="recentJobsPending" @click="fetchRecentJobs">
+            <RefreshCwIcon :size="12" :class="{ 'is-spinning': recentJobsPending }" />
+            Refresh
+          </button>
+          <button class="dev-btn dev-btn-ghost" style="font-size:11px;padding:4px 10px" @click="recentJobsExpanded = !recentJobsExpanded">
+            {{ recentJobsExpanded ? 'Collapse' : 'Expand' }}
+          </button>
+        </div>
+        <p v-if="!recentJobs.length && !recentJobsPending" class="dev-muted" style="font-size:12px">No recent jobs found.</p>
+        <div v-else-if="recentJobs.length" class="dev-table-wrap">
+          <table class="dev-table">
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Media ID</th>
+                <th>Started</th>
+                <th>Completed</th>
+                <th>Duration</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="job in (recentJobsExpanded ? recentJobs : recentJobs.slice(0, 20))"
+                :key="job.id"
+                :class="{
+                  'dev-job-row-running':   job.status === 'running',
+                  'dev-job-row-failed':    job.status === 'failed',
+                  'dev-job-row-completed': job.status === 'completed',
+                }"
+              >
+                <td class="dev-mono" style="font-size:11px">{{ job.type }}</td>
+                <td>
+                  <span
+                    class="dev-badge-ok"
+                    :class="{
+                      'dev-badge-warn':   job.status === 'failed',
+                      'dev-badge-muted':  job.status === 'pending',
+                      'dev-badge-active': job.status === 'running',
+                    }"
+                  >{{ job.status }}</span>
+                </td>
+                <td class="dev-mono" style="font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="job.media_id">{{ job.media_id.slice(0, 8) }}…</td>
+                <td class="dev-mono" style="font-size:11px">{{ fmtTimestamp(job.started_at) }}</td>
+                <td class="dev-mono" style="font-size:11px">{{ fmtTimestamp(job.completed_at) }}</td>
+                <td class="dev-mono" style="font-size:11px">{{ fmtDuration(job.duration_ms) }}</td>
+                <td style="font-size:10px;color:#f87171;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="job.error ?? ''">{{ job.error ?? '' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="!recentJobsExpanded && recentJobs.length > 20" class="dev-muted" style="font-size:11px;text-align:center;margin-top:6px">
+            Showing 20 of {{ recentJobs.length }} — <button class="dev-btn-inline" @click="recentJobsExpanded = true">show all</button>
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SW Upload Jobs tab ────────────────────────────────────────────── -->
+    <div v-if="tab === 'uploads'" class="dev-admin-content">
+
+      <!-- Toolbar -->
+      <div class="dev-sw-toolbar">
+        <span class="dev-sw-toolbar-count">
+          {{ swJobs.length }} job{{ swJobs.length !== 1 ? 's' : '' }} in SW IndexedDB
+        </span>
+        <div class="dev-sw-toolbar-actions">
+          <button class="dev-btn dev-btn-ghost dev-sw-refresh-btn" :disabled="swJobsLoading" @click="refreshSwJobs">
+            <RefreshCwIcon :size="13" :class="{ 'is-spinning': swJobsLoading }" />
+            Refresh
+          </button>
+          <button class="dev-btn dev-btn-ghost" :disabled="!swHasClearable" @click="clearSwDone">
+            <Trash2Icon :size="13" />
+            Clear done / errors
+          </button>
+        </div>
+      </div>
+
+      <!-- Empty state -->
+      <p v-if="!swJobsLoading && !swJobs.length" class="dev-admin-empty">
+        No upload jobs in SW storage.
+      </p>
+
+      <!-- Jobs table -->
+      <div v-else class="dev-sw-table-wrap">
+        <table class="dev-sw-table">
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Age</th>
+              <th>Object Key</th>
+              <th>Media</th>
+              <th style="text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template v-for="job in swJobs" :key="job.id">
+              <tr class="dev-sw-row" :class="`dev-sw-row-${swBadgeClass(job.status)}`">
+                <!-- Filename + short ID -->
+                <td>
+                  <div class="dev-sw-cell-file">
+                    <span class="dev-sw-filename">{{ job.filename || '(unnamed)' }}</span>
+                    <span class="dev-muted dev-sw-jobid">{{ job.id.slice(0, 8) }}…</span>
+                  </div>
+                </td>
+
+                <!-- Status badge -->
+                <td>
+                  <span class="dev-sw-badge" :class="`dev-sw-badge-${swBadgeClass(job.status)}`">
+                    {{ job.status }}
+                  </span>
+                </td>
+
+                <!-- Progress -->
+                <td>
+                  <div v-if="job.status === 'uploading'" class="dev-sw-progress-wrap">
+                    <div class="dev-sw-progress-track">
+                      <div class="dev-sw-progress-fill" :style="{ width: job.progress + '%' }" />
+                    </div>
+                    <span class="dev-muted" style="font-size:10px">{{ job.progress }}%</span>
+                  </div>
+                  <span v-else class="dev-muted">{{ job.progress > 0 ? job.progress + '%' : '—' }}</span>
+                </td>
+
+                <!-- Age -->
+                <td class="dev-muted">{{ swRelativeTime(job.createdAt) }}</td>
+
+                <!-- Object key (last two path segments) -->
+                <td>
+                  <span
+                    v-if="job.objectKey"
+                    class="dev-sw-key dev-muted"
+                    :title="job.objectKey"
+                  >
+                    …/{{ job.objectKey.split('/').slice(-2).join('/') }}
+                  </span>
+                  <span v-else class="dev-muted">—</span>
+                </td>
+
+                <!-- Media ID / link -->
+                <td>
+                  <a
+                    v-if="job.mediaId"
+                    class="dev-sw-media-link"
+                    :href="`/#media-${job.mediaId}`"
+                    target="_blank"
+                    :title="job.mediaId"
+                  >
+                    {{ job.mediaId.slice(0, 8) }}…
+                  </a>
+                  <span v-else class="dev-muted">—</span>
+                </td>
+
+                <!-- Actions -->
+                <td>
+                  <div class="dev-sw-row-actions">
+                    <button
+                      v-if="job.objectKey"
+                      class="dev-btn-icon"
+                      title="View in bucket tab"
+                      @click="viewSwJobInBucket(job.objectKey)"
+                    >
+                      <HardDriveIcon :size="13" />
+                    </button>
+                    <button
+                      v-if="job.status === 'error'"
+                      class="dev-btn-icon"
+                      title="Retry upload"
+                      @click="retrySwJob(job.id)"
+                    >
+                      <RefreshCwIcon :size="13" />
+                    </button>
+                    <button
+                      class="dev-btn-icon dev-btn-icon-danger"
+                      title="Cancel / remove from queue"
+                      @click="cancelSwJob(job.id)"
+                    >
+                      <XIcon :size="13" />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+
+              <!-- Error detail row -->
+              <tr v-if="job.error" class="dev-sw-error-row" :key="`${job.id}-err`">
+                <td colspan="7" class="dev-sw-error-cell">
+                  <AlertTriangleIcon :size="11" style="color:#f87171;flex-shrink:0" />
+                  {{ job.error }}
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
       </div>
     </div>
 
@@ -2125,8 +2510,24 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
   border-color: color-mix(in srgb, var(--color-accent) 30%, transparent);
   color: var(--color-accent);
 }
-.dev-badge-ok   { font-family: 'Geist Mono', monospace; font-size: 10px; color: #22c55e; }
-.dev-badge-warn { font-family: 'Geist Mono', monospace; font-size: 10px; color: #f59e0b; }
+.dev-badge-ok     { font-family: 'Geist Mono', monospace; font-size: 10px; color: #22c55e; }
+.dev-badge-warn   { font-family: 'Geist Mono', monospace; font-size: 10px; color: #f59e0b; }
+.dev-badge-muted  { font-family: 'Geist Mono', monospace; font-size: 10px; color: var(--color-text-muted); }
+.dev-badge-active { font-family: 'Geist Mono', monospace; font-size: 10px; color: #60a5fa; }
+
+.dev-job-row-running   td { background: rgba(96, 165, 250, 0.04); }
+.dev-job-row-failed    td { background: rgba(248, 113, 113, 0.05); }
+.dev-job-row-completed td { background: rgba(34, 197, 94, 0.03); }
+
+.dev-btn-inline {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-accent);
+  font-size: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
 
 /* ── Bucket tree rows ────────────────────────────────────────────────────── */
 .dev-bucket-main-filename {
@@ -2393,4 +2794,95 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
 .dev-modal-title { font-size: 15px; font-weight: 700; color: var(--color-text-primary); margin: 0 0 10px; }
 .dev-modal-body { font-size: 13px; color: var(--color-text-secondary); margin: 0 0 20px; line-height: 1.5; }
 .dev-modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ── Tab badge ──────────────────────────────────────────────────────────────── */
+.dev-tab-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  font-size: 10px; font-weight: 700; line-height: 1;
+  border-radius: 8px; margin-left: 5px;
+  background: var(--color-accent); color: #fff;
+}
+
+/* ── SW Upload Jobs tab ─────────────────────────────────────────────────────── */
+.dev-sw-toolbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 14px 20px; border-bottom: 1px solid var(--color-border);
+}
+.dev-sw-toolbar-count { font-size: 12px; color: var(--color-text-muted); flex: 1; }
+.dev-sw-toolbar-actions { display: flex; gap: 8px; }
+.dev-sw-refresh-btn svg { transition: transform 0.15s; }
+.dev-sw-refresh-btn .is-spinning { animation: spin 0.8s linear infinite; }
+
+.dev-sw-table-wrap { overflow-x: auto; }
+.dev-sw-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+  min-width: 700px;
+}
+.dev-sw-table thead th {
+  padding: 8px 12px; text-align: left;
+  font-size: 11px; font-weight: 600; color: var(--color-text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+.dev-sw-row td {
+  padding: 8px 12px; border-bottom: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+.dev-sw-row:last-child td { border-bottom: none; }
+.dev-sw-row:hover td { background: var(--color-hover); }
+.dev-sw-row-done td      { opacity: 0.6; }
+.dev-sw-row-skipped td   { opacity: 0.45; }
+
+.dev-sw-cell-file  { display: flex; flex-direction: column; gap: 1px; }
+.dev-sw-filename   { font-size: 12px; color: var(--color-text-primary); word-break: break-all; max-width: 220px; }
+.dev-sw-jobid      { font-size: 10px; font-family: 'Geist Mono', monospace; }
+
+.dev-sw-badge {
+  display: inline-block; padding: 2px 7px; border-radius: 10px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
+  border: 1px solid;
+}
+.dev-sw-badge-done    { color: #22c55e; border-color: color-mix(in srgb, #22c55e 30%, transparent); background: color-mix(in srgb, #22c55e 10%, transparent); }
+.dev-sw-badge-error   { color: #f87171; border-color: color-mix(in srgb, #f87171 30%, transparent); background: color-mix(in srgb, #f87171 10%, transparent); }
+.dev-sw-badge-active  { color: var(--color-accent); border-color: color-mix(in srgb, var(--color-accent) 30%, transparent); background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.dev-sw-badge-conflict{ color: #f59e0b; border-color: color-mix(in srgb, #f59e0b 30%, transparent); background: color-mix(in srgb, #f59e0b 10%, transparent); }
+.dev-sw-badge-skipped { color: var(--color-text-muted); border-color: var(--color-border); background: var(--color-surface); }
+.dev-sw-badge-pending { color: var(--color-text-secondary); border-color: var(--color-border); background: var(--color-surface); }
+
+.dev-sw-progress-wrap  { display: flex; align-items: center; gap: 6px; min-width: 80px; }
+.dev-sw-progress-track { flex: 1; height: 4px; background: var(--color-surface); border-radius: 2px; overflow: hidden; }
+.dev-sw-progress-fill  { height: 100%; background: var(--color-accent); border-radius: 2px; transition: width 0.3s ease; }
+
+.dev-sw-key {
+  font-size: 11px; font-family: 'Geist Mono', monospace;
+  max-width: 160px; display: inline-block;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom;
+}
+
+.dev-sw-media-link {
+  font-size: 11px; font-family: 'Geist Mono', monospace;
+  color: var(--color-accent); text-decoration: none;
+}
+.dev-sw-media-link:hover { text-decoration: underline; }
+
+.dev-sw-row-actions { display: flex; gap: 4px; justify-content: flex-end; }
+.dev-btn-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 6px;
+  border: 1px solid var(--color-border); background: transparent;
+  color: var(--color-text-secondary); cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.dev-btn-icon:hover { background: var(--color-hover); color: var(--color-text-primary); }
+.dev-btn-icon-danger:hover { background: color-mix(in srgb, #ef4444 12%, transparent); border-color: color-mix(in srgb, #ef4444 40%, transparent); color: #ef4444; }
+
+.dev-sw-error-row td { padding: 0; border-bottom: 1px solid var(--color-border); }
+.dev-sw-error-cell {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 12px 6px 24px;
+  font-size: 11px; color: #f87171; font-family: 'Geist Mono', monospace;
+  background: color-mix(in srgb, #f87171 4%, transparent);
+}
 </style>

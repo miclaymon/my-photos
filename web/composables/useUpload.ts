@@ -1,33 +1,40 @@
-import { addProvisionalItem, registerBlobUrl } from '~/composables/useGalleryData'
-
 /**
- * Upload state management.
+ * Upload composable — delegates all heavy work to the upload Service Worker.
  *
  * Flow:
- *   1. Files are dragged/dropped → addFiles() stages them.
- *   2. User picks libraries in AppLibraryPicker → startUpload(libraryIds) begins.
- *   3. For each file: request a presigned PUT URL from the API, then PUT directly
- *      to RustFS; update progress via XHR upload events.
- *   4. On completion, notify the API so it can record metadata in the DB.
+ *   1. Files are staged → addFiles() / drag → startUpload(libraryIds) → posts ADD_JOBS to SW
+ *   2. SW broadcasts progress events via BroadcastChannel('upload')
+ *   3. This composable listens and keeps reactive UI state in sync
+ *   4. On page load, GET_STATE syncs any in-progress jobs from a previous session
+ *
+ * Gallery integration:
+ *   METADATA_READY  → add shimmer provisional item at the correct date position
+ *   THUMBNAIL_READY → update provisional item with the client-generated blob thumbnail
+ *   COMPLETE        → promote provisional item (mark non-provisional, trigger gallery refresh)
  */
 
-export type UploadStatus = 'pending' | 'uploading' | 'done' | 'error'
+import {
+  addProvisionalItem,
+  updateProvisionalItem,
+  promoteProvisionalItem,
+  registerBlobUrl,
+} from '~/composables/useGalleryData'
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export type UploadStatus =
+  | 'queued' | 'hashing' | 'dupecheck' | 'conflict'
+  | 'thumbnailing' | 'waiting' | 'uploading' | 'notifying'
+  | 'done' | 'error' | 'skipped'
 
 export interface UploadFile {
-  id:       string
-  file:     File
-  progress: number   // 0–100
-  status:   UploadStatus
-  error?:   string
-  /** SHA-256 hex digest — computed before upload for duplicate detection */
-  hash?:                   string
-  /** If this is a resolved conflict, the chosen resolution */
-  _conflictResolution?:    DuplicateResolution
-  /** Existing media ID targeted by overwrite/version resolution */
-  _conflictExistingId?:    string
+  id:            string
+  file:          File
+  progress:      number
+  status:        UploadStatus
+  error?:        string
+  thumbnailUrl?: string   // client-generated blob URL (shown in toast)
 }
-
-// ── Duplicate detection types ─────────────────────────────────────────────────
 
 export interface DuplicateInfo {
   hash:             string
@@ -48,28 +55,250 @@ export interface DuplicateConflict {
   existing:   DuplicateInfo
 }
 
-// ── Module-level singletons shared across all component instances ─────────────
+// ── Module-level singletons ───────────────────────────────────────────────────
 
-const pendingFiles      = ref<UploadFile[]>([])        // staged, awaiting library choice
-const activeFiles       = ref<UploadFile[]>([])        // currently uploading / recently done
-const overlayVisible    = ref(false)                   // drag-over overlay
-const pickerOpen        = ref(false)                   // library picker modal
-const duplicateConflicts = ref<DuplicateConflict[]>([]) // pending conflict resolutions
+const pendingFiles       = ref<UploadFile[]>([])
+const activeFiles        = ref<UploadFile[]>([])
+const overlayVisible     = ref(false)
+const pickerOpen         = ref(false)
+const duplicateConflicts = ref<DuplicateConflict[]>([])
 const conflictResolveOpen = ref(false)
 
-// Derived helpers
+// Track which provisional item IDs we've added to the gallery (so we don't
+// add them again if STATE_SYNC arrives after a page refresh)
+const provisionalIds = new Set<string>()
+
+// Blob URLs for client thumbnails — revoke when the job is done
+const _thumbUrls = new Map<string, string>()
+
 const hasActive = computed(() =>
-  activeFiles.value.some(f => f.status === 'uploading' || f.status === 'pending'),
+  activeFiles.value.some(f =>
+    f.status !== 'done' && f.status !== 'error' && f.status !== 'skipped',
+  ),
 )
+
 const totalProgress = computed(() => {
-  const files = activeFiles.value.filter(f => f.status !== 'error')
+  const files = activeFiles.value.filter(f => f.status !== 'error' && f.status !== 'skipped')
   if (!files.length) return 0
-  return Math.round(files.reduce((acc, f) => acc + f.progress, 0) / files.length)
+  return Math.round(files.reduce((a, f) => a + f.progress, 0) / files.length)
 })
+
 const toastVisible = computed(() =>
   activeFiles.value.length > 0 &&
-  activeFiles.value.some(f => f.status !== 'done'),
+  activeFiles.value.some(f => f.status !== 'done' && f.status !== 'skipped'),
 )
+
+// ── SW channel setup (client-side only) ──────────────────────────────────────
+
+let _channel: BroadcastChannel | null = null
+
+function getChannel(): BroadcastChannel {
+  if (!_channel) {
+    _channel = new BroadcastChannel('upload')
+    _channel.addEventListener('message', onSWMessage)
+  }
+  return _channel
+}
+
+function postToSW(msg: unknown) {
+  getChannel().postMessage(msg)
+}
+
+function onSWMessage(e: MessageEvent) {
+  const msg = e.data as {
+    type: string
+    id?: string
+    jobs?: unknown[]
+    conflicts?: unknown[]
+    takenAt?: string | null
+    width?: number
+    height?: number
+    aspectRatio?: number
+    thumbnail?: ArrayBuffer
+    mimeType?: string
+    progress?: number
+    mediaId?: string
+    error?: string
+  }
+
+  switch (msg.type) {
+    case 'JOB_ADDED': {
+      // Jobs were acknowledged by the SW — already in activeFiles (added by startUpload)
+      break
+    }
+
+    case 'STATE_SYNC': {
+      // Re-sync after page refresh: restore in-progress jobs into activeFiles
+      const jobs = (msg.jobs ?? []) as Array<{
+        id: string; filename?: string; status: UploadStatus; progress: number
+        error?: string; mediaId?: string
+      }>
+      for (const job of jobs) {
+        if (job.status === 'skipped') continue
+
+        // For completed jobs: if we still have a provisional in the gallery (COMPLETE
+        // event was missed while the page was unloaded), promote it now.
+        if (job.status === 'done') {
+          if (provisionalIds.has(job.id) && job.mediaId) {
+            const thumbUrl = _thumbUrls.get(job.id)
+            if (thumbUrl) registerBlobUrl(job.mediaId, thumbUrl)
+            updateProvisionalItem(job.id, { id: job.mediaId })
+            promoteProvisionalItem(job.mediaId)
+            provisionalIds.delete(job.id)
+            const { activeLibraryId } = useAppShell()
+            const { loadLibraryMedia } = useGalleryData()
+            loadLibraryMedia(activeLibraryId.value)
+          }
+          continue
+        }
+
+        // For error jobs: clear any stuck gallery provisional (ERROR event may have
+        // been missed if the page was reloading when the SW broadcast it).
+        if (job.status === 'error' && provisionalIds.has(job.id)) {
+          updateProvisionalItem(job.id, { isProvisional: false, src: undefined })
+          provisionalIds.delete(job.id)
+        }
+
+        const existing = activeFiles.value.find(f => f.id === job.id)
+        if (!existing) {
+          activeFiles.value.push({
+            id:       job.id,
+            file:     new File([], job.filename ?? ''),
+            progress: job.progress,
+            status:   job.status,
+            error:    job.error,
+          })
+        } else {
+          existing.status   = job.status
+          existing.progress = job.progress
+        }
+      }
+      break
+    }
+
+    case 'METADATA_READY': {
+      const { id, takenAt, width, height, aspectRatio } = msg as {
+        id: string; takenAt: string | null; width: number; height: number; aspectRatio: number
+      }
+      const uf = activeFiles.value.find(f => f.id === id)
+
+      // Add a shimmer provisional item to the gallery at the correct date position
+      if (!provisionalIds.has(id)) {
+        provisionalIds.add(id)
+        const { activeLibraryId } = useAppShell()
+        const libraryId = activeLibraryId.value
+        if (libraryId && takenAt) {
+          addProvisionalItem({
+            id,
+            originalFilename: uf?.file.name ?? '',
+            aspectRatio:      aspectRatio || 1.5,
+            width:            width  || Math.round((aspectRatio || 1.5) >= 1 ? 1200 : 800),
+            height:           height || Math.round((aspectRatio || 1.5) >= 1 ? 800 : 1200),
+            takenAt:          takenAt,
+            isVideo:          uf ? uf.file.type.startsWith('video/') : false,
+            src:              undefined,   // no thumbnail yet — tile shows shimmer fallback
+            isProvisional:    true,
+          })
+        }
+      }
+      break
+    }
+
+    case 'THUMBNAIL_READY': {
+      const { id, thumbnail, mimeType } = msg as {
+        id: string; thumbnail: ArrayBuffer; mimeType: string
+      }
+      // Create a blob URL from the transferred ArrayBuffer
+      const blob   = new Blob([thumbnail], { type: mimeType })
+      const blobUrl = URL.createObjectURL(blob)
+
+      // Register for deferred revocation
+      const prev = _thumbUrls.get(id)
+      if (prev) URL.revokeObjectURL(prev)
+      _thumbUrls.set(id, blobUrl)
+
+      // Show thumbnail in toast
+      const uf = activeFiles.value.find(f => f.id === id)
+      if (uf) uf.thumbnailUrl = blobUrl
+
+      // Update gallery provisional item with the client thumbnail
+      updateProvisionalItem(id, { src: blobUrl })
+      break
+    }
+
+    case 'PROGRESS': {
+      const uf = activeFiles.value.find(f => f.id === msg.id)
+      if (uf) {
+        uf.progress = msg.progress ?? 0
+        uf.status   = 'uploading'
+      }
+      break
+    }
+
+    case 'COMPLETE': {
+      const { id, mediaId } = msg as { id: string; mediaId: string }
+      const uf = activeFiles.value.find(f => f.id === id)
+      if (uf) {
+        uf.progress = 100
+        uf.status   = 'done'
+      }
+
+      // Keep blob thumbnail alive as the provisional item's src (until server thumbnail arrives)
+      const thumbUrl = _thumbUrls.get(id)
+      if (thumbUrl) registerBlobUrl(mediaId, thumbUrl)
+
+      // Rename the provisional item to use the real mediaId so gallery can match it
+      updateProvisionalItem(id, { id: mediaId })
+      promoteProvisionalItem(mediaId)
+      provisionalIds.delete(id)
+
+      // Refresh gallery so the server item replaces the provisional
+      const { activeLibraryId } = useAppShell()
+      const { loadLibraryMedia } = useGalleryData()
+      loadLibraryMedia(activeLibraryId.value)
+      break
+    }
+
+    case 'ERROR': {
+      const uf = activeFiles.value.find(f => f.id === msg.id)
+      if (uf) {
+        uf.status = 'error'
+        uf.error  = msg.error
+      }
+      console.error('[upload] error for', uf?.file.name ?? msg.id, '—', msg.error)
+      provisionalIds.delete(msg.id!)
+      // Remove the shimmer from the gallery on error
+      updateProvisionalItem(msg.id!, { isProvisional: false, src: undefined })
+      break
+    }
+
+    case 'CONFLICT': {
+      type ConflictRaw = { jobId: string; existing: DuplicateInfo }
+      const rawConflicts = (msg.conflicts ?? []) as ConflictRaw[]
+      const conflicts: DuplicateConflict[] = rawConflicts.map(c => ({
+        uploadFile: activeFiles.value.find(f => f.id === c.jobId) ?? {
+          id: c.jobId, file: new File([], ''), progress: 0, status: 'conflict' as UploadStatus,
+        },
+        existing: c.existing,
+      }))
+      duplicateConflicts.value  = conflicts
+      conflictResolveOpen.value = true
+      break
+    }
+  }
+}
+
+// Initialize the BroadcastChannel and request state sync on client
+if (import.meta.client) {
+  // Open channel immediately so we don't miss early SW broadcasts
+  getChannel()
+  // Ask the SW for any in-progress jobs (handles page refresh recovery)
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.ready.then(() => {
+      postToSW({ type: 'GET_STATE' })
+    })
+  }
+}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -81,17 +310,14 @@ export function useUpload() {
     if (!files.length) return
 
     pendingFiles.value = files.map(file => ({
-      id:       crypto.randomUUID(),
-      file,
-      progress: 0,
-      status:   'pending' as UploadStatus,
+      id: crypto.randomUUID(), file, progress: 0, status: 'pending' as UploadStatus,
     }))
     pickerOpen.value = true
   }
 
   function cancelStaged() {
-    pendingFiles.value = []
-    pickerOpen.value   = false
+    pendingFiles.value   = []
+    pickerOpen.value     = false
     overlayVisible.value = false
   }
 
@@ -103,93 +329,7 @@ export function useUpload() {
     pickerOpen.value     = false
     overlayVisible.value = false
 
-    // 1. Hash all files in parallel
-    await Promise.all(batch.map(async (uf) => {
-      uf.hash = await computeHash(uf.file)
-    }))
-
-    // 2. Check for duplicates server-side
-    const hashes = batch.map(uf => uf.hash).filter(Boolean) as string[]
-    const { duplicates: rawDuplicates } = await $fetch<{ duplicates: Array<{
-      id:                string
-      hash:              string
-      original_filename: string
-      content_type:      string
-      size:              number
-      width?:            number | null
-      height?:           number | null
-      taken_at?:         string | null
-      thumbnail_url?:    string | null
-    }> }>(
-      '/api/v1/media/check-duplicates',
-      { method: 'POST', body: { hashes } },
-    ).catch(() => ({ duplicates: [] }))
-
-    const duplicates: DuplicateInfo[] = rawDuplicates.map(d => ({
-      hash:             d.hash,
-      id:               d.id,
-      originalFilename: d.original_filename,
-      contentType:      d.content_type,
-      size:             d.size,
-      width:            d.width ?? undefined,
-      height:           d.height ?? undefined,
-      takenAt:          d.taken_at ?? undefined,
-      thumbnailSrc:     d.thumbnail_url ?? undefined,
-    }))
-
-    const dupeMap = new Map(duplicates.map(d => [d.hash, d]))
-    const conflicts: DuplicateConflict[] = batch
-      .filter(uf => uf.hash && dupeMap.has(uf.hash))
-      .map(uf => ({ uploadFile: uf, existing: dupeMap.get(uf.hash!)! }))
-
-    if (conflicts.length > 0) {
-      // Pause — show conflict resolution modal
-      duplicateConflicts.value  = conflicts
-      conflictResolveOpen.value = true
-      // Store the non-conflicting files and libraryIds for after resolution
-      _pendingUploadBatch.value   = batch.filter(uf => !uf.hash || !dupeMap.has(uf.hash))
-      _pendingUploadLibraries.value = libraryIds
-      return
-    }
-
-    await _executeBatch(batch, libraryIds)
-  }
-
-  /** Called by the conflict modal once the user has chosen a resolution per file. */
-  async function resolveConflictsAndUpload(resolutions: Map<string, DuplicateResolution>) {
-    const conflicts    = duplicateConflicts.value.slice()
-    const clean        = _pendingUploadBatch.value.slice()
-    const libraryIds   = _pendingUploadLibraries.value.slice()
-
-    duplicateConflicts.value      = []
-    conflictResolveOpen.value     = false
-    _pendingUploadBatch.value     = []
-    _pendingUploadLibraries.value = []
-
-    const toUpload: UploadFile[] = [...clean]
-    for (const conflict of conflicts) {
-      const res = resolutions.get(conflict.uploadFile.id) ?? 'keep'
-      if (res === 'keep') continue
-      conflict.uploadFile._conflictResolution = res
-      conflict.uploadFile._conflictExistingId = conflict.existing.id
-      toUpload.push(conflict.uploadFile)
-    }
-
-    if (toUpload.length > 0) {
-      await _executeBatch(toUpload, libraryIds)
-    }
-  }
-
-  function dismissConflicts() {
-    duplicateConflicts.value    = []
-    conflictResolveOpen.value   = false
-    _pendingUploadBatch.value   = []
-    _pendingUploadLibraries.value = []
-  }
-
-  function dismissToast() {
-    activeFiles.value = activeFiles.value.filter(f => f.status !== 'done')
-    if (!activeFiles.value.length) activeFiles.value = []
+    _dispatchJobs(batch, libraryIds)
   }
 
   async function startUploadDirect(libraryIds: string[], fileList: FileList | File[]) {
@@ -198,12 +338,40 @@ export function useUpload() {
     )
     if (!files.length) return
     const batch: UploadFile[] = files.map(file => ({
-      id:       crypto.randomUUID(),
-      file,
-      progress: 0,
-      status:   'pending' as UploadStatus,
+      id: crypto.randomUUID(), file, progress: 0, status: 'pending' as UploadStatus,
     }))
-    await _executeBatch(batch, libraryIds)
+    _dispatchJobs(batch, libraryIds)
+  }
+
+  function resolveConflictsAndUpload(resolutions: Map<string, DuplicateResolution>) {
+    const resolvedConflicts = duplicateConflicts.value.slice()
+    duplicateConflicts.value  = []
+    conflictResolveOpen.value = false
+
+    const swResolutions = resolvedConflicts.map(c => {
+      const res = resolutions.get(c.uploadFile.id) ?? 'keep'
+      return {
+        id:         c.uploadFile.id,
+        resolution: res,
+        existingId: c.existing.id,
+      }
+    })
+
+    postToSW({ type: 'RESOLVE_CONFLICTS', resolutions: swResolutions })
+  }
+
+  function dismissConflicts() {
+    // Treat all conflicts as 'keep' (skip)
+    resolveConflictsAndUpload(new Map())
+    duplicateConflicts.value  = []
+    conflictResolveOpen.value = false
+  }
+
+  function dismissToast() {
+    activeFiles.value = activeFiles.value.filter(
+      f => f.status !== 'done' && f.status !== 'skipped' && f.status !== 'error',
+    )
+    postToSW({ type: 'CLEAR_DONE' })
   }
 
   return {
@@ -226,185 +394,22 @@ export function useUpload() {
   }
 }
 
-// ── Internal batch state (between library picker and conflict resolution) ──────
+// ── Internal ──────────────────────────────────────────────────────────────────
 
-const _pendingUploadBatch     = ref<UploadFile[]>([])
-const _pendingUploadLibraries = ref<string[]>([])
-
-async function _executeBatch(batch: UploadFile[], libraryIds: string[]) {
-  activeFiles.value.push(...batch)
-  await Promise.all(batch.map(uf => uploadOne(uf, libraryIds)))
-
-  const { activeLibraryId } = useAppShell()
-  const { loadLibraryMedia } = useGalleryData()
-  await loadLibraryMedia(activeLibraryId.value)
-}
-
-// ── EXIF date helper ──────────────────────────────────────────────────────────
-
-/**
- * Read DateTimeOriginal (or fallback EXIF date tags) from the first 64 KB of
- * the file. Returns a Date if found, null otherwise.
- *
- * We slice the file rather than reading it all — JPEG EXIF lives right at the
- * start so 64 KB is always enough.
- */
-async function readExifDate(file: File): Promise<Date | null> {
-  if (!file.type.startsWith('image/')) return null
-  try {
-    const ExifReader = (await import('exifreader')).default
-    const slice = file.slice(0, 65536)
-    const buffer = await slice.arrayBuffer()
-    const tags = ExifReader.load(buffer, { expanded: false })
-
-    const rawDate =
-      (tags['DateTimeOriginal'] as { description?: string } | undefined)?.description ??
-      (tags['DateTimeDigitized'] as { description?: string } | undefined)?.description ??
-      (tags['DateTime'] as { description?: string } | undefined)?.description
-
-    if (!rawDate) return null
-
-    // EXIF format: "YYYY:MM:DD HH:MM:SS" — normalise date part separator
-    const normalized = rawDate.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')
-    const d = new Date(normalized)
-    return isNaN(d.getTime()) ? null : d
-  } catch {
-    return null
+function _dispatchJobs(batch: UploadFile[], libraryIds: string[]) {
+  // Add to activeFiles immediately so the toast appears
+  for (const uf of batch) {
+    uf.status = 'queued'
+    activeFiles.value.push(uf)
   }
-}
 
-// ── SHA-256 hash helper ────────────────────────────────────────────────────────
-
-async function computeHash(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer()
-  const digest = await crypto.subtle.digest('SHA-256', buffer)
-  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
-}
-
-// ── Dimension helper ──────────────────────────────────────────────────────────
-
-function measureImageDimensions(file: File): Promise<{ width: number; height: number; aspectRatio: number } | null> {
-  if (!file.type.startsWith('image/')) return Promise.resolve(null)
-  return new Promise(resolve => {
-    const url = URL.createObjectURL(file)
-    const img = new Image()
-    img.onload = () => {
-      URL.revokeObjectURL(url)
-      const w = img.naturalWidth
-      const h = img.naturalHeight
-      resolve(h > 0 ? { width: w, height: h, aspectRatio: w / h } : null)
-    }
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(null) }
-    img.src = url
+  // Send File objects + metadata to the SW via BroadcastChannel
+  postToSW({
+    type: 'ADD_JOBS',
+    jobs: batch.map(uf => ({
+      id:         uf.id,
+      file:       uf.file,
+      libraryIds,
+    })),
   })
-}
-
-// ── Internal upload helper ─────────────────────────────────────────────────────
-
-async function uploadOne(uf: UploadFile, libraryIds: string[]) {
-  const entry = activeFiles.value.find(f => f.id === uf.id)
-  if (!entry) return
-
-  try {
-    entry.status = 'uploading'
-
-    // Measure dimensions before we start the XHR (browser already has the file)
-    const dims = await measureImageDimensions(uf.file)
-
-    // 1. Request presigned URL from our API
-    const { upload_url: uploadUrl, object_key: objectKey } = await $fetch<{ upload_url: string; object_key: string }>(
-      '/api/v1/media/upload-url',
-      {
-        method: 'POST',
-        body: { filename: uf.file.name, content_type: uf.file.type, library_ids: libraryIds },
-      },
-    )
-
-    // 2. PUT directly to RustFS via XHR for upload-progress events
-    await new Promise<void>((resolve, reject) => {
-      const xhr = new XMLHttpRequest()
-      xhr.open('PUT', uploadUrl)
-      xhr.setRequestHeader('Content-Type', uf.file.type)
-
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          entry.progress = Math.round((e.loaded / e.total) * 100)
-        }
-      })
-
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve()
-        } else {
-          reject(new Error(`Upload failed: HTTP ${xhr.status}`))
-        }
-      })
-      xhr.addEventListener('error', () => reject(new Error('Network error during upload')))
-      xhr.send(uf.file)
-    })
-
-    // 3. Notify the API that the upload is complete so it can persist metadata.
-    //    For images: try client-side EXIF first, fall back to File.lastModified
-    //    (phone photos often have the shot date as the file date).
-    //    For videos: File.lastModified is unreliable (it's the copy/download date,
-    //    not the recording date). Send null and let the server extract creation_time
-    //    from the MP4 container via ffprobe.
-    const isVideoFile = uf.file.type.startsWith('video/')
-    const exifDate    = await readExifDate(uf.file)   // returns null for videos
-    const itemTakenAt = isVideoFile
-      ? null
-      : (exifDate ?? new Date(uf.file.lastModified))
-
-    const { id: mediaId } = await $fetch<{ id: string }>('/api/v1/media/complete', {
-      method: 'POST',
-      body: {
-        object_key:   objectKey,
-        filename:     uf.file.name,
-        content_type: uf.file.type,
-        size:         uf.file.size,
-        library_ids:  libraryIds,
-        width:        dims?.width,
-        height:       dims?.height,
-        aspect_ratio: dims?.aspectRatio,
-        taken_at:     itemTakenAt?.toISOString() ?? null,
-        hash:         uf.hash,
-      },
-    })
-
-    // Overwrite resolution: the new record was created — permanently delete the
-    // old one so it doesn't appear as a duplicate in the gallery.
-    // 'version' intentionally keeps both records; 'keep' never reaches here.
-    if (uf._conflictResolution === 'overwrite' && uf._conflictExistingId) {
-      await $fetch(`/api/v1/media/${uf._conflictExistingId}/permanent-delete`, {
-        method: 'POST',
-      }).catch(() => {
-        // Non-fatal — the new record is already created; the old one can be
-        // cleaned up manually from Trash if the delete fails.
-      })
-    }
-
-    // 4. Optimistically add the item to the gallery with a local blob URL.
-    //    The blob URL is preserved in the real item by loadLibraryMedia until
-    //    the background thumbnail job produces a server-side thumbnail.
-    const provisionalTakenAt = itemTakenAt ?? new Date()
-    const blobUrl = URL.createObjectURL(uf.file)
-    registerBlobUrl(mediaId, blobUrl)
-    addProvisionalItem({
-      id:               mediaId,
-      originalFilename: uf.file.name,
-      aspectRatio:      dims?.aspectRatio ?? 1.5,
-      width:            dims?.width  ?? Math.round((dims?.aspectRatio ?? 1.5) >= 1 ? 1200 : 800),
-      height:           dims?.height ?? Math.round((dims?.aspectRatio ?? 1.5) >= 1 ? 800 : 1200),
-      takenAt:          provisionalTakenAt.toISOString(),
-      isVideo:          uf.file.type.startsWith('video/'),
-      src:              blobUrl,
-      isProvisional:    false,
-    })
-
-    entry.progress = 100
-    entry.status   = 'done'
-  } catch (err: unknown) {
-    entry.status = 'error'
-    entry.error  = err instanceof Error ? err.message : 'Unknown error'
-  }
 }

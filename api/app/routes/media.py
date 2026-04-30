@@ -3,6 +3,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
@@ -83,8 +84,30 @@ def get_upload_url(
 ):
     safe = _safe_filename(body.filename)
     object_key = f"{current_user.id}/{uuid.uuid4()}/{safe}"
-    upload_url = generate_presigned_upload_url(object_key, body.content_type, expires_in=900)
+    # Return a same-origin proxy path so the browser/SW uploads to our Nuxt
+    # server instead of directly to S3. This avoids CORS issues when the storage
+    # endpoint is on a different host.
+    upload_url = f"/api/v1/media/upload?object_key={quote(object_key, safe='')}"
     return {"upload_url": upload_url, "object_key": object_key}
+
+
+@router.get("/presign-upload")
+def presign_upload(
+    object_key: str,
+    content_type: str = "application/octet-stream",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return a presigned S3 PUT URL for the given object_key.
+
+    The Nuxt BFF calls this (small JSON over loopback, fine) then PUTs the
+    binary body directly to S3 (real network interface, bypasses loopback
+    kernel bug that drops TCP sends >= ~4050 bytes).
+    """
+    if not object_key.startswith(f"{current_user.id}/"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    url = generate_presigned_upload_url(object_key, content_type)
+    return {"url": url}
 
 
 @router.post("/check-duplicates")

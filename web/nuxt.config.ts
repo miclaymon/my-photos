@@ -17,6 +17,7 @@ export default defineNuxtConfig({
   },
 
   modules: [
+    '@vite-pwa/nuxt',
     '@nuxt/image',
     '@nuxtjs/tailwindcss',
     'nuxt-auth-utils',
@@ -63,6 +64,18 @@ export default defineNuxtConfig({
   // album detail page hero, giving a connected, native-app-style transition.
   experimental: {
     viewTransition: true,
+  },
+
+  // Upload service worker — bundles service-worker/sw.ts as a standalone SW.
+  // No PWA precaching or manifest needed; we only want the SW infrastructure
+  // for background upload persistence across page refreshes.
+  pwa: {
+    strategies: 'injectManifest',
+    srcDir: 'service-worker',
+    filename: 'sw.ts',
+    injectManifest: { injectionPoint: undefined },
+    devOptions: { enabled: true, type: 'module' },
+    manifest: false,
   },
 
   typescript: {

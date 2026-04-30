@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, desc, func, or_
+from sqlalchemy import and_, asc, desc, extract, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import get_db
@@ -125,8 +125,10 @@ def _serialize_media_item(m: Media) -> dict:
         "created_at": m.created_at.isoformat() if isinstance(m.created_at, datetime) else m.created_at,
         "is_video": is_video,
         "duration_seconds": m.duration_seconds,
-        # Full-res src: only for videos without a thumbnail (needed for <video> first-frame)
-        "src": _presign(m.object_key) if is_video and not has_thumbnail else None,
+        # Full-res src: for any item without a thumbnail yet (images or videos).
+        # Images normally show via thumbnailSrc; this fallback keeps newly uploaded
+        # items visible in the gallery while the background thumbnail job is pending.
+        "src": _presign(m.object_key) if not has_thumbnail else None,
         "thumbnail_src": _presign(m.thumbnail_object_key),
         # preview_src omitted — fetched on demand in the lightbox
         "preview_src": None,
@@ -199,12 +201,16 @@ def create_library(
 @router.get("/{library_id}/media")
 def list_library_media(
     library_id: str,
-    limit: int = Query(default=50, le=500),
-    cursor: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, le=2000),
+    before: Optional[str] = Query(default=None),
+    after: Optional[str] = Query(default=None),
+    cursor: Optional[str] = Query(default=None),   # alias for before
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    q = (
+    before = before or cursor  # backwards compat
+
+    base_q = (
         db.query(Media)
         .join(LibraryMedia, LibraryMedia.media_id == Media.id)
         .filter(
@@ -215,21 +221,140 @@ def list_library_media(
         )
     )
 
-    if cursor:
+    if after:
         try:
-            cursor_dt = datetime.fromisoformat(cursor)
-            q = q.filter(
+            after_dt = datetime.fromisoformat(after)
+            q = base_q.filter(
                 or_(
-                    Media.taken_at < cursor_dt,
-                    and_(Media.taken_at.is_(None), Media.created_at < cursor_dt),
+                    Media.taken_at > after_dt,
+                    and_(Media.taken_at.is_(None), Media.created_at > after_dt),
                 )
-            )
+            ).order_by(asc(Media.taken_at).nullslast(), asc(Media.created_at))
         except ValueError:
-            pass  # ignore malformed cursor
+            q = base_q.order_by(desc(Media.taken_at), desc(Media.created_at))
+        direction = "after"
+    else:
+        q = base_q
+        if before:
+            try:
+                before_dt = datetime.fromisoformat(before)
+                q = q.filter(
+                    or_(
+                        Media.taken_at < before_dt,
+                        and_(Media.taken_at.is_(None), Media.created_at < before_dt),
+                    )
+                )
+            except ValueError:
+                pass
+        q = q.order_by(desc(Media.taken_at), desc(Media.created_at))
+        direction = "before"
 
-    items = q.order_by(desc(Media.taken_at), desc(Media.created_at)).limit(limit).all()
+    raw      = q.limit(limit + 1).all()
+    has_more = len(raw) > limit
+    page     = raw[:limit]
 
-    return {"items": [_serialize_media_item(m) for m in items]}
+    if not page:
+        return {
+            "items":        [],
+            "has_older":    False,
+            "has_newer":    False,
+            "older_cursor": None,
+            "newer_cursor": None,
+            "next_cursor":  None,
+        }
+
+    def _cursor_dt(m: Media) -> Optional[str]:
+        pivot = m.taken_at or m.created_at
+        return pivot.isoformat() if isinstance(pivot, datetime) else None
+
+    if direction == "after":
+        # ASC order: page[0] is oldest, page[-1] is newest in this batch
+        older_cursor = _cursor_dt(page[0])
+        newer_cursor = _cursor_dt(page[-1])
+        has_older    = True   # items older than after_dt always exist
+        has_newer    = has_more
+    else:
+        # DESC order: page[0] is newest, page[-1] is oldest in this batch
+        newer_cursor = _cursor_dt(page[0])
+        older_cursor = _cursor_dt(page[-1])
+        has_older    = has_more
+        has_newer    = bool(before)  # if we paged with `before`, newer items exist above
+
+    return {
+        "items":        [_serialize_media_item(m) for m in page],
+        "has_older":    has_older,
+        "has_newer":    has_newer,
+        "older_cursor": older_cursor,
+        "newer_cursor": newer_cursor,
+        "next_cursor":  older_cursor if has_older else None,  # backwards compat
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/library/{library_id}/timeline
+# ---------------------------------------------------------------------------
+
+@router.get("/{library_id}/timeline")
+def library_timeline(
+    library_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Per-month photo counts + date range for the gallery timeline scrollbar.
+
+    Only months that actually contain photos are returned — the frontend never
+    renders ticks for empty months/years.  Results are meant to be cached by
+    the client; the query is a single indexed aggregation and is fast.
+    """
+    # COALESCE(taken_at, created_at) so items without EXIF still land in a bucket
+    date_expr = func.coalesce(Media.taken_at, Media.created_at)
+
+    _filters = [
+        LibraryMedia.library_id == library_id,
+        Media.deletion_date.is_(None),
+        Media.archived_at.is_(None),
+        Media.is_private.is_(False),
+    ]
+
+    yr  = extract("year",  date_expr).label("yr")
+    mo  = extract("month", date_expr).label("mo")
+    cnt = func.count(Media.id).label("cnt")
+
+    rows = (
+        db.query(yr, mo, cnt)
+        .select_from(Media)
+        .join(LibraryMedia, LibraryMedia.media_id == Media.id)
+        .filter(*_filters)
+        .group_by(yr, mo)
+        .order_by(desc(yr), desc(mo))
+        .all()
+    )
+
+    rng = (
+        db.query(
+            func.min(date_expr).label("oldest"),
+            func.max(date_expr).label("newest"),
+        )
+        .select_from(Media)
+        .join(LibraryMedia, LibraryMedia.media_id == Media.id)
+        .filter(*_filters)
+        .first()
+    )
+
+    def _iso(dt) -> Optional[str]:
+        if dt is None:
+            return None
+        return dt.isoformat() if isinstance(dt, datetime) else str(dt)
+
+    return {
+        "buckets": [
+            {"year": int(r.yr), "month": int(r.mo), "count": r.cnt}
+            for r in rows
+        ],
+        "total":      sum(r.cnt for r in rows),
+        "newest_at":  _iso(rng.newest) if rng else None,
+        "oldest_at":  _iso(rng.oldest) if rng else None,
+    }
 
 
 # ---------------------------------------------------------------------------
