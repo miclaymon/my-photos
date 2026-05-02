@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     storage_region: str = "us-east-1"
     storage_max_versions: int = 3
 
+    # Response cache (SQLite)
+    cache_db_path: str = "./response_cache.db"
+
     # CORS — comma-separated list of allowed origins for the web client and any
     # other clients (e.g. "http://localhost:3000,https://photos.example.com")
     cors_origins_raw: str = "http://localhost:3000"

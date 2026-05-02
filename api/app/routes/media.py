@@ -11,6 +11,8 @@ from sqlalchemy import and_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.cache import invalidate_library
+from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.library import Library, LibraryMedia
@@ -70,6 +72,13 @@ def _check_owner_or_admin(media: Media, current_user: User) -> None:
 def _build_thumbnail_url(media: Media) -> Optional[str]:
     key = media.thumbnail_object_key or media.object_key
     return generate_presigned_download_url(key) if key else None
+
+
+def _invalidate_media_libraries(db: Session, media_id: str) -> None:
+    """Invalidate cache for all libraries that contain this media item."""
+    rows = db.query(LibraryMedia.library_id).filter(LibraryMedia.media_id == media_id).all()
+    for (lid,) in rows:
+        invalidate_library(settings.cache_db_path, lid)
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +195,8 @@ def complete_upload(
 
     db.commit()
     db.refresh(media)
+    for lid in body.library_ids:
+        invalidate_library(settings.cache_db_path, lid)
     enqueue_jobs(media.id, body.content_type, bool(body.hash), db)
     background_tasks.add_task(process_after_upload, media.id)
     return {"id": media.id}
@@ -205,14 +216,17 @@ def get_media(
     if not media:
         raise HTTPException(status_code=404, detail="Not found")
 
-    image_url = generate_presigned_download_url(media.object_key)
+    is_video = (media.content_type or "").startswith("video/")
+    # Videos get a longer-lived URL so seeking still works after long pauses
+    media_url_expiry = 21600 if is_video else 3600  # 6h for video, 1h for images
+    image_url = generate_presigned_download_url(media.object_key, expires_in=media_url_expiry)
     thumbnail_url = (
         generate_presigned_download_url(media.thumbnail_object_key)
         if media.thumbnail_object_key
         else None
     )
     preview_url = (
-        generate_presigned_download_url(media.preview_object_key)
+        generate_presigned_download_url(media.preview_object_key, expires_in=media_url_expiry)
         if media.preview_object_key
         else None
     )
@@ -271,6 +285,7 @@ def soft_delete(
     )
     db.add(deleted_item)
     db.commit()
+    _invalidate_media_libraries(db, media_id)
     return {"ok": True}
 
 
@@ -289,6 +304,7 @@ def restore(
     media.deletion_date = None
     db.query(DeletedItem).filter(DeletedItem.media_id == media_id).delete()
     db.commit()
+    _invalidate_media_libraries(db, media_id)
     return {"ok": True}
 
 
@@ -306,6 +322,7 @@ def archive_media(
 
     media.archived_at = datetime.now(timezone.utc)
     db.commit()
+    _invalidate_media_libraries(db, media_id)
     return {"ok": True}
 
 
@@ -323,6 +340,7 @@ def unarchive_media(
 
     media.archived_at = None
     db.commit()
+    _invalidate_media_libraries(db, media_id)
     return {"ok": True}
 
 
@@ -343,6 +361,9 @@ def permanent_delete(
         raise HTTPException(status_code=400, detail="Media must be soft-deleted before permanent deletion")
 
     _check_owner_or_admin(media, current_user)
+
+    # Capture library IDs before dependent rows are removed
+    lib_ids = [r.library_id for r in db.query(LibraryMedia.library_id).filter(LibraryMedia.media_id == media_id).all()]
 
     # Delete storage objects — failures are non-fatal
     for key in [media.object_key, media.thumbnail_object_key, media.preview_object_key]:
@@ -365,6 +386,8 @@ def permanent_delete(
 
     db.delete(media)
     db.commit()
+    for lid in lib_ids:
+        invalidate_library(settings.cache_db_path, lid)
     return {"ok": True}
 
 
@@ -380,6 +403,7 @@ def make_private(
     _check_owner_or_admin(media, current_user)
     media.is_private = True
     db.commit()
+    _invalidate_media_libraries(db, media_id)
     return {"ok": True}
 
 
@@ -395,6 +419,7 @@ def unmake_private(
     _check_owner_or_admin(media, current_user)
     media.is_private = False
     db.commit()
+    _invalidate_media_libraries(db, media_id)
     return {"ok": True}
 
 

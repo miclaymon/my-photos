@@ -637,6 +637,42 @@ function onKey(e: KeyboardEvent) {
 
 onMounted(()   => window.addEventListener('keydown', onKey))
 onUnmounted(() => window.removeEventListener('keydown', onKey))
+
+// ── Mouse inactivity (nav button auto-hide) ───────────────────────────────
+const mouseActive = ref(false)
+let _mouseTimer: ReturnType<typeof setTimeout> | null = null
+
+function onMouseMove() {
+  mouseActive.value = true
+  if (_mouseTimer) clearTimeout(_mouseTimer)
+  _mouseTimer = setTimeout(() => { mouseActive.value = false }, 2500)
+}
+
+function onMouseLeave() {
+  if (_mouseTimer) { clearTimeout(_mouseTimer); _mouseTimer = null }
+  mouseActive.value = false
+}
+
+// ── Touch swipe (left = next, right = prev) ───────────────────────────────
+let _touchStartX = 0
+let _touchStartY = 0
+
+function onTouchStart(e: TouchEvent) {
+  const t = e.touches[0]
+  if (!t) return
+  _touchStartX = t.clientX
+  _touchStartY = t.clientY
+}
+
+function onTouchEnd(e: TouchEvent) {
+  const t = e.changedTouches[0]
+  if (!t) return
+  const dx = t.clientX - _touchStartX
+  const dy = t.clientY - _touchStartY
+  if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+    dx < 0 ? goNext() : goPrev()
+  }
+}
 </script>
 
 <template>
@@ -646,11 +682,21 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
     <div
       class="preview-main"
       @click.self="closePreview"
+      @mousemove="onMouseMove"
+      @mouseleave="onMouseLeave"
+      @touchstart.passive="onTouchStart"
+      @touchend.passive="onTouchEnd"
     >
 
-      <!-- Top-right controls: x-ray + info + close -->
+      <!-- Top-left close button -->
+      <button class="preview-ctrl-close" aria-label="Close preview" @click="closePreview">
+        <XIcon :size="18" />
+      </button>
+
+      <!-- Top-right controls: x-ray (images only) + info -->
       <div class="preview-controls">
         <button
+          v-if="!item.isVideo"
           class="preview-ctrl-btn"
           :class="{ 'is-active': xrayMode }"
           aria-label="X-Ray mode"
@@ -668,15 +714,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
         >
           <InfoIcon :size="18" />
         </button>
-        <button class="preview-ctrl-btn" aria-label="Close preview" @click="closePreview">
-          <XIcon :size="18" />
-        </button>
       </div>
 
       <!-- Prev -->
       <button
         v-if="prevItem"
         class="preview-nav preview-nav-prev"
+        :class="{ 'is-active': mouseActive }"
         aria-label="Previous"
         @click="goPrev"
       >
@@ -688,20 +732,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 
         <!-- ── VIDEO ──────────────────────────────────────────────────── -->
         <template v-if="item.isVideo">
-          <!-- Wait until the full src is available (fetched on demand for videos
-               with server thumbnails — src is omitted from the gallery list). -->
-          <video
+          <!-- VideoPlayer mounts client-side; wait until mediaSrc is available -->
+          <VideoPlayer
             v-if="mediaSrc"
-            :key="item.id + '-' + mediaSrc"
+            :key="item.id"
             :src="mediaSrc"
-            class="preview-video"
-            :width="previewSize.w"
-            :height="previewSize.h"
-            controls
-            autoplay
-            playsinline
+            :content-type="fetchedDetail?.contentType ?? undefined"
+            :aspect-ratio="item.aspectRatio"
             style="view-transition-name: photo-preview"
-            @click.stop
           />
           <div v-else class="preview-video-loading" :style="{ width: previewSize.w + 'px', height: previewSize.h + 'px' }" />
         </template>
@@ -746,19 +784,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
       <button
         v-if="nextItem"
         class="preview-nav preview-nav-next"
+        :class="{ 'is-active': mouseActive }"
         aria-label="Next"
         @click="goNext"
       >
         <ChevronRightIcon :size="26" />
       </button>
-
-      <!-- Caption -->
-      <div class="preview-caption">
-        <span class="preview-filename">{{ item.originalFilename }}</span>
-        <span v-if="currentIndex >= 0" class="preview-counter">
-          {{ currentIndex + 1 }} / {{ allItems.length }}
-        </span>
-      </div>
 
     </div><!-- /.preview-main -->
 
@@ -1183,6 +1214,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.94);
+  /* Clip the video player so it never visually bleeds into the info panel */
+  overflow: hidden;
+  /* Establish a stacking context so VideoJS internals stay below the info panel */
+  isolation: isolate;
 }
 
 .preview-image-area {
@@ -1191,7 +1226,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   justify-content: center;
   width: 100%;
   height: 100%;
-  padding: 56px 80px 64px;
+  box-sizing: border-box;
   position: relative;
 }
 
@@ -1224,17 +1259,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   opacity: 1;
 }
 
-.preview-video {
-  display: block;
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  border-radius: 3px;
-  position: absolute;
-  outline: none;
-  background: #000;
-}
-
 .preview-video-loading {
   border-radius: 3px;
   background: #111;
@@ -1257,8 +1281,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   background: rgba(255, 255, 255, 0.12);
   color: rgba(255, 255, 255, 0.9);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, opacity 0.25s;
   backdrop-filter: blur(8px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.preview-nav.is-active {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .preview-nav:hover {
@@ -1269,42 +1300,35 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 .preview-nav-prev { left: 16px; }
 .preview-nav-next { right: 16px; }
 
-.preview-caption {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 20px;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.65) 0%, transparent 100%);
-}
-
-.preview-filename {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.65);
-  font-family: 'Geist Mono', monospace;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 60%;
-}
-
-.preview-counter {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.45);
-  font-family: 'Geist Mono', monospace;
-  flex-shrink: 0;
-}
-
 .preview-not-found {
   color: rgba(255, 255, 255, 0.7);
   flex-direction: column;
   gap: 16px;
   font-size: 15px;
 }
+
+/* ── Top-left close button ──────────────────────────────────────────────── */
+
+.preview-ctrl-close {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  backdrop-filter: blur(8px);
+}
+
+.preview-ctrl-close:hover { background: rgba(255, 255, 255, 0.2); color: #fff; }
 
 /* ── Top-right controls ─────────────────────────────────────────────────── */
 
@@ -1345,6 +1369,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   background: rgba(18, 18, 18, 0.96);
   border-left: 0 solid rgba(255, 255, 255, 0.08);
   transition: width 0.22s ease, border-left-width 0s 0.22s;
+  /* Sit above the video player's stacking context */
+  position: relative;
+  z-index: 1;
 }
 
 .preview-info-panel.is-open {

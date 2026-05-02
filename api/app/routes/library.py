@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, asc, desc, extract, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.cache import get as cache_get, set as cache_set, invalidate_library, make_key, MEDIA_TTL, TIMELINE_TTL  # noqa: F401
+from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User
@@ -210,6 +212,15 @@ def list_library_media(
 ):
     before = before or cursor  # backwards compat
 
+    _params = {"limit": limit, "before": before, "after": after}
+    _key = make_key(current_user.id, f"/{library_id}/media", _params)
+    _media_path = f"/{library_id}/media?" + "&".join(
+        f"{k}={v}" for k, v in sorted(_params.items()) if v is not None
+    )
+    cached = cache_get(settings.cache_db_path, _key)
+    if cached is not None:
+        return cached
+
     base_q = (
         db.query(Media)
         .join(LibraryMedia, LibraryMedia.media_id == Media.id)
@@ -254,7 +265,7 @@ def list_library_media(
     page     = raw[:limit]
 
     if not page:
-        return {
+        result = {
             "items":        [],
             "has_older":    False,
             "has_newer":    False,
@@ -262,6 +273,8 @@ def list_library_media(
             "newer_cursor": None,
             "next_cursor":  None,
         }
+        cache_set(settings.cache_db_path, _key, library_id, result, MEDIA_TTL, path=_media_path)
+        return result
 
     def _cursor_dt(m: Media) -> Optional[str]:
         pivot = m.taken_at or m.created_at
@@ -280,7 +293,7 @@ def list_library_media(
         has_older    = has_more
         has_newer    = bool(before)  # if we paged with `before`, newer items exist above
 
-    return {
+    result = {
         "items":        [_serialize_media_item(m) for m in page],
         "has_older":    has_older,
         "has_newer":    has_newer,
@@ -288,6 +301,8 @@ def list_library_media(
         "newer_cursor": newer_cursor,
         "next_cursor":  older_cursor if has_older else None,  # backwards compat
     }
+    cache_set(settings.cache_db_path, _key, library_id, result, MEDIA_TTL, path=_media_path)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +321,11 @@ def library_timeline(
     renders ticks for empty months/years.  Results are meant to be cached by
     the client; the query is a single indexed aggregation and is fast.
     """
+    _key = make_key(current_user.id, f"/{library_id}/timeline", {})
+    cached = cache_get(settings.cache_db_path, _key)
+    if cached is not None:
+        return cached
+
     # COALESCE(taken_at, created_at) so items without EXIF still land in a bucket
     date_expr = func.coalesce(Media.taken_at, Media.created_at)
 
@@ -346,7 +366,7 @@ def library_timeline(
             return None
         return dt.isoformat() if isinstance(dt, datetime) else str(dt)
 
-    return {
+    result = {
         "buckets": [
             {"year": int(r.yr), "month": int(r.mo), "count": r.cnt}
             for r in rows
@@ -355,6 +375,8 @@ def library_timeline(
         "newest_at":  _iso(rng.newest) if rng else None,
         "oldest_at":  _iso(rng.oldest) if rng else None,
     }
+    cache_set(settings.cache_db_path, _key, library_id, result, TIMELINE_TTL, path=f"/{library_id}/timeline")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1109,6 +1131,7 @@ def copy_from_library(
     stmt = pg_insert(LibraryMedia.__table__).values(values).on_conflict_do_nothing()
     result = db.execute(stmt)
     db.commit()
+    invalidate_library(settings.cache_db_path, library_id)
     return {"ok": True, "count": result.rowcount}
 
 

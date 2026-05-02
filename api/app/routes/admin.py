@@ -20,6 +20,7 @@ from app.models.subject import Subject, SubjectDetection
 from app.models.tag import MediaTag, UserFavorite
 from app.models.user import User
 from app.storage.s3 import delete_object, generate_presigned_download_url, get_s3_client
+from app.cache import clear_all as cache_clear_all, invalidate_key as cache_invalidate_key, list_entries as cache_list_entries
 from app.config import settings
 from app.worker_config import get_config, update_config
 
@@ -890,6 +891,31 @@ def delete_bucket_object(
 def get_worker_config(current_user: User = Depends(get_admin_user)):
     """Return the current worker_config.json contents."""
     return get_config()
+
+
+# ---------------------------------------------------------------------------
+# Response cache admin
+# ---------------------------------------------------------------------------
+
+@router.get("/cache")
+def get_cache_entries(current_user: User = Depends(get_admin_user)):
+    """Return metadata for all current response-cache entries."""
+    entries = cache_list_entries(settings.cache_db_path)
+    return {"entries": entries, "total": len(entries)}
+
+
+@router.delete("/cache")
+def clear_cache(current_user: User = Depends(get_admin_user)):
+    """Wipe all response-cache entries."""
+    deleted = cache_clear_all(settings.cache_db_path)
+    return {"deleted": deleted}
+
+
+@router.delete("/cache/{key}")
+def delete_cache_entry(key: str, current_user: User = Depends(get_admin_user)):
+    """Remove a single cache entry by its SHA-256 key."""
+    cache_invalidate_key(settings.cache_db_path, key)
+    return {"ok": True}
 
 
 @router.patch("/worker-config")

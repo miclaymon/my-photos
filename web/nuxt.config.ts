@@ -30,7 +30,7 @@ export default defineNuxtConfig({
     }],
   ],
 
-  css: ['~/assets/css/main.css'],
+  css: ['~/assets/css/main.css', 'video.js/dist/video-js.css'],
 
   // @nuxt/image configuration
   image: {

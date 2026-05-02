@@ -9,10 +9,7 @@ export interface MediaItem {
   originalFilename: string
   /** Presigned URL to the full-resolution source (image or video). */
   src?:             string
-  /**
-   * Presigned URL to the extracted thumbnail image (video items only).
-   * Populated by the background ffmpeg job after upload.
-   */
+  /** Presigned URL to the extracted thumbnail image. Stable within a 1-hour window (see s3.py). */
   thumbnailSrc?:    string
   /**
    * Presigned URL to the short low-res preview clip (video items only).

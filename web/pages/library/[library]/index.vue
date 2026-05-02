@@ -53,6 +53,25 @@ watch(sections, async (secs) => {
   recompute()
 }, { once: true })
 
+// Preload the first ~20 thumbnails as soon as gallery data arrives so the
+// browser fetches them at high priority before <img loading="lazy"> tags are
+// even in the DOM. Fires once — we don't want to preload infinite-scroll pages.
+watch(sections, (secs) => {
+  const urls = secs
+    .flatMap(s => s.items)
+    .slice(0, 20)
+    .map(i => i.thumbnailSrc ?? i.src)
+    .filter((u): u is string => !!u && !u.startsWith('blob:'))
+  if (urls.length === 0) return
+  for (const href of urls) {
+    const link = document.createElement('link')
+    link.rel  = 'preload'
+    link.as   = 'image'
+    link.href = href
+    document.head.appendChild(link)
+  }
+}, { once: true })
+
 watch(activeStickyKey, (key) => {
   const newHash = key ? `#${key}` : ''
   if (route.hash !== newHash) router.replace({ hash: newHash })

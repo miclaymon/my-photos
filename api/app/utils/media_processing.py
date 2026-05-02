@@ -241,6 +241,58 @@ def _process_image(media: Media, data: bytes, db: Session) -> None:
             pass
 
 
+_FASTSTART_TYPES = ("video/mp4", "video/quicktime", "video/x-m4v")
+
+
+def _apply_faststart(media: Media, tmp_path: str) -> None:
+    """
+    Re-mux an MP4/MOV file with the moov atom at the front (faststart).
+    Stream copy — no re-encoding. Replaces the S3 object in-place.
+    Silently skips container types that don't support this (WebM, MKV, etc.).
+    """
+    if not any(media.content_type.lower().startswith(p) for p in _FASTSTART_TYPES):
+        return
+
+    try:
+        import ffmpeg  # type: ignore[import]
+    except ImportError:
+        return
+
+    faststart_tmp = tmp_path + "_faststart.mp4"
+    try:
+        (
+            ffmpeg.input(tmp_path)
+            .output(faststart_tmp, codec="copy", movflags="faststart")
+            .overwrite_output()
+            .run(quiet=True)
+        )
+        if not os.path.exists(faststart_tmp):
+            return
+
+        with open(faststart_tmp, "rb") as fh:
+            faststart_bytes = fh.read()
+
+        client = get_s3_client()
+        client.put_object(
+            Bucket=settings.storage_bucket_name,
+            Key=media.object_key,
+            Body=faststart_bytes,
+            ContentType=media.content_type,
+        )
+        if media.size is not None:
+            media.size = len(faststart_bytes)
+        logger.info("Applied MP4 faststart for media %s (%d bytes)", media.id, len(faststart_bytes))
+
+    except Exception as exc:
+        logger.warning("_apply_faststart failed for media %s: %s", media.id, exc)
+    finally:
+        if os.path.exists(faststart_tmp):
+            try:
+                os.unlink(faststart_tmp)
+            except OSError:
+                pass
+
+
 def _process_video(media: Media, data: bytes, db: Session) -> None:
     """
     Probe video metadata, extract a thumbnail frame (and optional 5s preview
@@ -379,6 +431,11 @@ def _process_video(media: Media, data: bytes, db: Session) -> None:
                     taken_at = datetime.fromisoformat(raw_ct.rstrip("Z"))
                 except ValueError:
                     pass
+
+        # Apply MP4 faststart — moves the moov atom to the front of the file so
+        # the browser can start playing immediately via range requests without
+        # having to fetch the end of the file first. Stream copy: no re-encoding.
+        _apply_faststart(media, tmp_path)
 
         # Persist updates
         if width is not None:

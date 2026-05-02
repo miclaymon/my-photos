@@ -8,10 +8,10 @@ import {
   RefreshCwIcon, DatabaseIcon, HardDriveIcon, ImageIcon, InfoIcon,
   XIcon, Trash2Icon, PencilIcon, AlertTriangleIcon, UsersIcon, LinkIcon,
   ShieldOffIcon, UserPlusIcon, CpuIcon, CheckCircleIcon, XCircleIcon,
-  ClockIcon,
+  ClockIcon, LayersIcon,
 } from 'lucide-vue-next'
 
-definePageMeta({ middleware: 'auth' })
+definePageMeta({ middleware: 'auth', ssr: false })
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -117,7 +117,7 @@ async function fetchBucketObjects() {
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
-const tab = ref<'media' | 'bucket' | 'libraries' | 'jobs' | 'uploads'>('media')
+const tab = ref<'media' | 'bucket' | 'libraries' | 'jobs' | 'uploads' | 'cache'>('media')
 
 // ── Trash cleanup ──────────────────────────────────────────────────────────────
 
@@ -504,6 +504,8 @@ watch(tab, (t) => {
   } else {
     if (_swPoller) { clearInterval(_swPoller); _swPoller = null }
   }
+
+  if (t === 'cache') fetchCacheEntries()
 })
 
 async function runJob(name: JobName) {
@@ -986,6 +988,59 @@ const swHasClearable = computed(() =>
   swJobs.value.some(j => j.status === 'done' || j.status === 'error' || j.status === 'skipped'),
 )
 
+// ── Response Cache tab ────────────────────────────────────────────────────────
+
+interface CacheEntry {
+  key:           string
+  library_id:    string
+  path:          string
+  cached_at:     number
+  ttl:           number
+  age_seconds:   number
+  ttl_remaining: number
+  body_bytes:    number
+  expired:       boolean
+}
+
+const cacheData    = ref<CacheEntry[]>([])
+const cachePending = ref(false)
+const cacheError   = ref<string | null>(null)
+const clearAllPending = ref(false)
+
+async function fetchCacheEntries() {
+  cachePending.value = true
+  cacheError.value   = null
+  try {
+    const res = await $fetch<{ entries: CacheEntry[]; total: number }>('/api/v1/admin/cache')
+    cacheData.value = res.entries
+  } catch (e: unknown) {
+    cacheError.value = e instanceof Error ? e.message : 'Failed to load cache'
+  } finally {
+    cachePending.value = false
+  }
+}
+
+async function clearAllCache() {
+  clearAllPending.value = true
+  try {
+    await $fetch('/api/v1/admin/cache', { method: 'DELETE' })
+    await fetchCacheEntries()
+  } finally {
+    clearAllPending.value = false
+  }
+}
+
+async function deleteCacheEntry(key: string) {
+  await $fetch(`/api/v1/admin/cache/${key}`, { method: 'DELETE' })
+  cacheData.value = cacheData.value.filter(e => e.key !== key)
+}
+
+function fmtTtl(seconds: number): string {
+  if (seconds <= 0)  return 'expired'
+  if (seconds < 60)  return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+}
+
 // ── Watches ────────────────────────────────────────────────────────────────────
 
 watch(mediaFilter,    () => { mediaPage.value = 1 })
@@ -1036,7 +1091,7 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
       <!-- Tabs -->
       <div class="dev-admin-tabs">
         <button
-          v-for="t in (['media', 'bucket', 'libraries', 'jobs', 'uploads'] as const)"
+          v-for="t in (['media', 'bucket', 'libraries', 'jobs', 'uploads', 'cache'] as const)"
           :key="t"
           class="dev-admin-tab"
           :class="{ 'is-active': tab === t }"
@@ -1046,6 +1101,10 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
           <template v-else-if="t === 'bucket'">Bucket Objects</template>
           <template v-else-if="t === 'libraries'">Libraries</template>
           <template v-else-if="t === 'jobs'">Background Jobs</template>
+          <template v-else-if="t === 'cache'">
+            Response Cache
+            <span v-if="t === 'cache' && cacheData.length" class="dev-tab-badge">{{ cacheData.length }}</span>
+          </template>
           <template v-else>
             SW Uploads
             <span v-if="t === 'uploads' && swJobs.some(j => j.status !== 'done' && j.status !== 'skipped')" class="dev-tab-badge">
@@ -1057,7 +1116,7 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
     </div>
 
     <!-- Error / Loading states for the overview (only shown for DB-backed tabs) -->
-    <template v-if="tab !== 'bucket' && tab !== 'uploads'">
+    <template v-if="tab !== 'bucket' && tab !== 'uploads' && tab !== 'cache'">
       <div v-if="error" class="dev-admin-error">
         <strong>Error:</strong> {{ error.message }}
         <span v-if="error.statusCode === 401" style="display:block;margin-top:6px;font-size:12px;color:var(--color-text-muted)">
@@ -1800,6 +1859,72 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
       </div>
     </div>
 
+    <!-- ── Response Cache tab ───────────────────────────────────────────── -->
+    <div v-if="tab === 'cache'" class="dev-admin-content">
+      <!-- Toolbar -->
+      <div class="dev-table-toolbar" style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px;flex:1">
+          <LayersIcon :size="15" style="color:var(--color-text-muted)" />
+          <span class="dev-muted" style="font-size:12px">
+            {{ cacheData.length }} entr{{ cacheData.length === 1 ? 'y' : 'ies' }} ·
+            SQLite at <code style="font-size:11px">response_cache.db</code>
+          </span>
+        </div>
+        <button class="dev-btn dev-btn-ghost" :disabled="cachePending" @click="fetchCacheEntries">
+          <RefreshCwIcon :size="13" />
+          Refresh
+        </button>
+        <button
+          v-if="cacheData.length"
+          class="dev-btn dev-btn-danger"
+          :disabled="clearAllPending"
+          @click="clearAllCache"
+        >
+          <Trash2Icon :size="13" />
+          {{ clearAllPending ? 'Clearing…' : 'Clear all' }}
+        </button>
+      </div>
+
+      <div v-if="cacheError" class="dev-admin-error">{{ cacheError }}</div>
+      <div v-else-if="cachePending" class="dev-admin-loading">Loading…</div>
+      <div v-else-if="!cacheData.length" class="dev-admin-empty">Cache is empty.</div>
+
+      <div v-else class="dev-table-wrap">
+        <table class="dev-table">
+          <thead>
+            <tr>
+              <th>Endpoint path</th>
+              <th>Library ID</th>
+              <th>Cached</th>
+              <th>TTL remaining</th>
+              <th>Size</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="entry in cacheData" :key="entry.key" :class="{ 'dev-row-warn': entry.expired }">
+              <td>
+                <code class="dev-object-key" :title="entry.key">{{ entry.path || '—' }}</code>
+              </td>
+              <td class="dev-muted" style="font-size:11px">{{ entry.library_id.slice(0, 8) }}…</td>
+              <td class="dev-muted">{{ relativeTime(new Date(entry.cached_at * 1000).toISOString()) }}</td>
+              <td>
+                <span :style="{ color: entry.ttl_remaining < 30 ? '#ef4444' : entry.ttl_remaining < 120 ? '#f59e0b' : 'inherit' }">
+                  {{ fmtTtl(entry.ttl_remaining) }}
+                </span>
+              </td>
+              <td class="dev-muted">{{ formatBytes(entry.body_bytes) }}</td>
+              <td>
+                <button class="dev-btn-icon dev-btn-icon-danger" title="Delete entry" @click="deleteCacheEntry(entry.key)">
+                  <XIcon :size="13" />
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- ── Delete DB record dialog ──────────────────────────────────────── -->
     <Transition name="dev-lightbox">
       <div v-if="deleteDbTarget" class="dev-lightbox" @click="deleteDbTarget = null">
@@ -2419,6 +2544,7 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
 .dev-table tr:last-child td { border-bottom: none; }
 .dev-table tr:hover td { background: var(--color-hover); }
 .dev-table tr.is-selected td { background: color-mix(in srgb, var(--color-accent) 6%, transparent); }
+.dev-table tr.dev-row-warn td { background: color-mix(in srgb, #f59e0b 8%, transparent); }
 
 /* ── Sortable headers ────────────────────────────────────────────────────── */
 .dev-th-sort {

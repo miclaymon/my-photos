@@ -40,6 +40,7 @@ Clients (browser / iOS / Android)
 | Auth | [`nuxt-auth-utils`](https://github.com/atinux/nuxt-auth-utils) — cookie session wrapping FastAPI JWT |
 | Styling | Custom CSS + [Tailwind CSS](https://tailwindcss.com) utilities |
 | Images | [`@nuxt/image`](https://image.nuxt.com) — lazy-loading, WebP, responsive srcset |
+| Video | [Video.js](https://videojs.com) 8.x — in-browser video player with loop, retry logic |
 
 ### Data API (`api/`)
 
@@ -137,6 +138,7 @@ Open [http://localhost:3000](http://localhost:3000) and sign in with the admin c
 | `STORAGE_REGION` | No | `us-east-1` | S3 region (any value works for self-hosted). |
 | `STORAGE_MAX_VERSIONS` | No | `3` | Max versions per object. `0` disables versioning. |
 | `CORS_ORIGINS_RAW` | No | `http://localhost:3000` | Comma-separated allowed origins. |
+| `CACHE_DB_PATH` | No | `./response_cache.db` | Path for the SQLite API response cache file. |
 
 ### `web/.env`
 
@@ -206,6 +208,9 @@ All API routes are versioned under `/api/v1/` and are implemented in the FastAPI
 | `GET`  | `/api/v1/admin/jobs/status` | Current status of all background jobs (Admin only) |
 | `POST` | `/api/v1/admin/jobs/run` | Trigger a background job (Admin only) |
 | `POST` | `/api/v1/admin/subjects/recluster` | Re-cluster all person subjects by L2 distance on ArcFace embeddings (Admin only) |
+| `GET`  | `/api/v1/admin/cache` | List all API response cache entries with path, TTL, and size (Admin only) |
+| `DELETE` | `/api/v1/admin/cache` | Clear all API response cache entries (Admin only) |
+| `DELETE` | `/api/v1/admin/cache/:key` | Remove a single cache entry by key (Admin only) |
 
 ---
 
@@ -376,6 +381,12 @@ Albums are curated collections of media items within a library, with a defined s
 - Docker container bundling
 
 ### Recently shipped
+- **Video player** — VideoJS 8.x component with loop, fill mode, and automatic retry on network errors; X-Ray mode hidden for videos
+- **Preview UI overhaul** — removed image area padding for edge-to-edge display; close button moved to top-left; nav arrows fade after 2.5 s of mouse inactivity; touch swipe navigation (50 px threshold)
+- **Browser thumbnail caching** — presigned S3 download URLs snapped to UTC hour boundary (2 h expiry) so the same URL is generated for the same object within a given hour, enabling browser disk-cache hits natively
+- **Gallery preload hints** — `<link rel="preload" as="image">` injected for the first 20 thumbnails on initial data load
+- **API response cache** — SQLite-backed TTL cache (`api/app/cache.py`) for `GET /{library_id}/media` (5 min) and `GET /{library_id}/timeline` (10 min); keyed on user + path + sorted params; auto-invalidated on any media mutation
+- **Admin cache UI** — Response Cache tab on `/admin/dev` shows all cache entries (endpoint+params, library, age, TTL remaining, size) with per-entry delete and clear-all; backed by new `GET/DELETE /api/v1/admin/cache` endpoints
 - Three-tier monorepo restructure — `web/` (Nuxt BFF) + `api/` (FastAPI + PostgreSQL + Python workers)
 - People & Pets — face detection (insightface ArcFace 512-d), grouping, naming, cover photos, hide/unhide, preview overlays with click-to-name/navigate; subject re-clustering admin tool; gallery shows photo thumbnails, subject detail header shows face crop
 - Object detection — YOLOv8n bounding boxes on preview (admin setting), pet subject creation

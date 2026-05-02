@@ -52,8 +52,16 @@ def _presign_url(
     object_key: str,
     expires_in: int,
     content_type: str | None = None,
+    stable: bool = False,
 ) -> str:
-    """Build a path-style presigned URL using AWS Signature Version 4."""
+    """Build a path-style presigned URL using AWS Signature Version 4.
+
+    When stable=True the timestamp is snapped to the current UTC hour so all
+    calls within the same hour produce an identical URL.  The browser can then
+    disk-cache the response across page loads because the URL never changes
+    within the hour.  expires_in should be at least 2× the window (2 hours)
+    so URLs remain valid even when generated near the end of a window.
+    """
     endpoint   = settings.storage_endpoint.rstrip("/")
     bucket     = settings.storage_bucket_name
     access_key = settings.storage_access_key_id
@@ -62,7 +70,10 @@ def _presign_url(
 
     host = urlparse(endpoint).netloc
 
-    now        = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if stable:
+        # Snap to the start of the current UTC hour
+        now = now.replace(minute=0, second=0, microsecond=0)
     datestamp  = now.strftime("%Y%m%d")
     amz_date   = now.strftime("%Y%m%dT%H%M%SZ")
     scope      = f"{datestamp}/{region}/s3/aws4_request"
@@ -127,8 +138,11 @@ def generate_presigned_upload_url(object_key: str, content_type: str, expires_in
     return _presign_url("PUT", object_key, expires_in, content_type=content_type)
 
 
-def generate_presigned_download_url(object_key: str, expires_in: int = 3600) -> str:
-    return _presign_url("GET", object_key, expires_in)
+def generate_presigned_download_url(object_key: str, expires_in: int = 7200) -> str:
+    # stable=True snaps the timestamp to the hour boundary so repeated calls
+    # produce the same URL → browser disk-cache hits on every page reload.
+    # Default expiry is 2 h so URLs generated at :59 are still valid next hour.
+    return _presign_url("GET", object_key, expires_in, stable=True)
 
 
 # ---------------------------------------------------------------------------
