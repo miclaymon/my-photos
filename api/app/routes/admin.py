@@ -23,6 +23,7 @@ from app.storage.s3 import delete_object, generate_presigned_download_url, get_s
 from app.cache import clear_all as cache_clear_all, invalidate_key as cache_invalidate_key, list_entries as cache_list_entries
 from app.config import settings
 from app.worker_config import get_config, update_config
+from app.app_config import get_config as get_app_config, update_config as update_app_config
 
 router = APIRouter()
 
@@ -929,3 +930,25 @@ def patch_worker_config(
     except (ValueError, KeyError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     return updated
+
+
+# ---------------------------------------------------------------------------
+# App config admin (config.json)
+# ---------------------------------------------------------------------------
+
+@router.get("/app-config")
+def get_application_config(current_user: User = Depends(get_admin_user)):
+    """Return the full application config (config.json)."""
+    return get_app_config()
+
+
+@router.patch("/app-config")
+def patch_application_config(
+    patch: dict,
+    current_user: User = Depends(get_admin_user),
+):
+    """Merge patch into config.json and write it back atomically."""
+    try:
+        return update_app_config(patch)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=str(e))

@@ -3,13 +3,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, asc, desc, extract, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.cache import get as cache_get, set as cache_set, invalidate_library, make_key, MEDIA_TTL, TIMELINE_TTL  # noqa: F401
+from app.app_config import get_cache_config
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
@@ -207,19 +208,31 @@ def list_library_media(
     before: Optional[str] = Query(default=None),
     after: Optional[str] = Query(default=None),
     cursor: Optional[str] = Query(default=None),   # alias for before
+    response: Response = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     before = before or cursor  # backwards compat
+
+    cache_cfg   = get_cache_config()
+    _level      = cache_cfg.get("level", "high")
+    _media_ttl  = int(cache_cfg.get("media_ttl_seconds", MEDIA_TTL))
+
+    if response is not None:
+        if _level == "off":
+            response.headers["Cache-Control"] = "no-store, no-cache"
+        elif _level in ("extreme", "high", "medium"):
+            response.headers["Cache-Control"] = f"private, max-age={_media_ttl}"
 
     _params = {"limit": limit, "before": before, "after": after}
     _key = make_key(current_user.id, f"/{library_id}/media", _params)
     _media_path = f"/{library_id}/media?" + "&".join(
         f"{k}={v}" for k, v in sorted(_params.items()) if v is not None
     )
-    cached = cache_get(settings.cache_db_path, _key)
-    if cached is not None:
-        return cached
+    if _level not in ("off", "low"):
+        cached = cache_get(settings.cache_db_path, _key)
+        if cached is not None:
+            return cached
 
     base_q = (
         db.query(Media)
@@ -273,7 +286,8 @@ def list_library_media(
             "newer_cursor": None,
             "next_cursor":  None,
         }
-        cache_set(settings.cache_db_path, _key, library_id, result, MEDIA_TTL, path=_media_path)
+        if _level not in ("off", "low"):
+            cache_set(settings.cache_db_path, _key, library_id, result, _media_ttl, path=_media_path)
         return result
 
     def _cursor_dt(m: Media) -> Optional[str]:
@@ -301,7 +315,8 @@ def list_library_media(
         "newer_cursor": newer_cursor,
         "next_cursor":  older_cursor if has_older else None,  # backwards compat
     }
-    cache_set(settings.cache_db_path, _key, library_id, result, MEDIA_TTL, path=_media_path)
+    if _level not in ("off", "low"):
+        cache_set(settings.cache_db_path, _key, library_id, result, _media_ttl, path=_media_path)
     return result
 
 
@@ -312,6 +327,7 @@ def list_library_media(
 @router.get("/{library_id}/timeline")
 def library_timeline(
     library_id: str,
+    response: Response = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -321,10 +337,21 @@ def library_timeline(
     renders ticks for empty months/years.  Results are meant to be cached by
     the client; the query is a single indexed aggregation and is fast.
     """
+    cache_cfg      = get_cache_config()
+    _level         = cache_cfg.get("level", "high")
+    _timeline_ttl  = int(cache_cfg.get("timeline_ttl_seconds", TIMELINE_TTL))
+
+    if response is not None:
+        if _level == "off":
+            response.headers["Cache-Control"] = "no-store, no-cache"
+        elif _level in ("extreme", "high", "medium"):
+            response.headers["Cache-Control"] = f"private, max-age={_timeline_ttl}"
+
     _key = make_key(current_user.id, f"/{library_id}/timeline", {})
-    cached = cache_get(settings.cache_db_path, _key)
-    if cached is not None:
-        return cached
+    if _level not in ("off", "low"):
+        cached = cache_get(settings.cache_db_path, _key)
+        if cached is not None:
+            return cached
 
     # COALESCE(taken_at, created_at) so items without EXIF still land in a bucket
     date_expr = func.coalesce(Media.taken_at, Media.created_at)
@@ -375,7 +402,8 @@ def library_timeline(
         "newest_at":  _iso(rng.newest) if rng else None,
         "oldest_at":  _iso(rng.oldest) if rng else None,
     }
-    cache_set(settings.cache_db_path, _key, library_id, result, TIMELINE_TTL, path=f"/{library_id}/timeline")
+    if _level not in ("off", "low"):
+        cache_set(settings.cache_db_path, _key, library_id, result, _timeline_ttl, path=f"/{library_id}/timeline")
     return result
 
 

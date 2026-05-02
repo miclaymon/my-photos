@@ -10,6 +10,7 @@ import type { GalleryMode, GallerySize, GalleryGap } from '~/composables/useGall
 
 const { settingsOpen, theme, closeSettings, setTheme } = useAppShell()
 const { galleryMode, gallerySize, galleryGap, showDayGroups, setMode, setSize, setGap, setShowDayGroups } = useGallery()
+const { showToast } = useToast()
 
 const { user } = useUserSession()
 const isAdmin = computed(() => !!(user.value as { isAdmin?: boolean } | null)?.isAdmin)
@@ -129,23 +130,103 @@ function onKey(e: KeyboardEvent) {
 type TabId = 'appearance' | 'features' | 'storage' | 'account' | 'admin' | 'sync'
 
 interface Tab {
-  id:    TabId
-  label: string
-  icon:  unknown
+  id:        TabId
+  label:     string
+  icon:      unknown
+  adminOnly?: boolean
 }
 
-const tabs: Tab[] = [
-  { id: 'appearance', label: 'Appearance', icon: PaletteIcon   },
-  { id: 'features',   label: 'Features',   icon: LayoutGridIcon },
-  { id: 'storage',    label: 'Storage',    icon: HardDriveIcon },
-  { id: 'account',    label: 'Account',    icon: UserIcon      },
-  { id: 'admin',      label: 'Admin',      icon: ShieldIcon    },
-  { id: 'sync',       label: 'Sync',       icon: RefreshCwIcon },
+const ALL_TABS: Tab[] = [
+  { id: 'appearance', label: 'Appearance', icon: PaletteIcon    },
+  { id: 'features',   label: 'Features',   icon: LayoutGridIcon  },
+  { id: 'storage',    label: 'Storage',    icon: HardDriveIcon   },
+  { id: 'account',    label: 'Account',    icon: UserIcon        },
+  { id: 'admin',      label: 'Admin',      icon: ShieldIcon, adminOnly: true },
+  { id: 'sync',       label: 'Sync',       icon: RefreshCwIcon   },
 ]
+
+const tabs = computed(() => ALL_TABS.filter(t => !t.adminOnly || isAdmin.value))
 
 const activeTab = ref<TabId>('appearance')
 
-watch(activeTab, (tab) => { if (tab === 'features') loadWorkerConfig() })
+watch(activeTab, (tab) => {
+  if (tab === 'features') loadWorkerConfig()
+  if (tab === 'admin')    loadAppConfig()
+})
+
+// ── App config — cache settings (admin only) ─────────────────────────────────
+interface AppCacheConfig {
+  level:                string
+  media_ttl_seconds:    number
+  timeline_ttl_seconds: number
+  invalidate_on_upload: boolean
+}
+
+const CACHE_LEVELS = [
+  { value: 'extreme', label: 'Extreme' },
+  { value: 'high',    label: 'High'    },
+  { value: 'medium',  label: 'Medium'  },
+  { value: 'low',     label: 'Low'     },
+  { value: 'off',     label: 'Off'     },
+]
+
+const CACHE_LEVEL_HINTS: Record<string, string> = {
+  extreme: 'All optimizations — server-side SQLite cache, browser Cache-Control headers, and client preload hints. Fastest repeated loads.',
+  high:    'Server-side SQLite cache with browser Cache-Control headers. Recommended default.',
+  medium:  'Same as High. Reserved for future tuning.',
+  low:     'No server-side response cache. Every gallery request hits the database.',
+  off:     'No caching at all. Adds Cache-Control: no-store to all gallery responses. Not recommended — significantly increases server load.',
+}
+
+const appCacheLevel        = ref('high')
+const appMediaTtl          = ref(300)
+const appTimelineTtl       = ref(600)
+const appInvalidateOnUpload = ref(true)
+const appConfigLoading     = ref(false)
+const appConfigSaving      = ref(false)
+const appConfigError       = ref<string | null>(null)
+
+const currentCacheLevelHint = computed(() => CACHE_LEVEL_HINTS[appCacheLevel.value] ?? '')
+
+async function loadAppConfig() {
+  if (!isAdmin.value) return
+  appConfigLoading.value = true
+  appConfigError.value   = null
+  try {
+    const cfg = await $fetch<{ cache: AppCacheConfig }>('/api/v1/admin/app-config')
+    appCacheLevel.value         = cfg.cache?.level               ?? 'high'
+    appMediaTtl.value           = cfg.cache?.media_ttl_seconds   ?? 300
+    appTimelineTtl.value        = cfg.cache?.timeline_ttl_seconds ?? 600
+    appInvalidateOnUpload.value = cfg.cache?.invalidate_on_upload ?? true
+  } catch {
+    appConfigError.value = 'Failed to load settings.'
+  } finally {
+    appConfigLoading.value = false
+  }
+}
+
+async function saveAppConfig() {
+  appConfigSaving.value = true
+  appConfigError.value  = null
+  try {
+    await $fetch('/api/v1/admin/app-config', {
+      method: 'PATCH',
+      body: {
+        cache: {
+          level:                appCacheLevel.value,
+          media_ttl_seconds:    appMediaTtl.value,
+          timeline_ttl_seconds: appTimelineTtl.value,
+          invalidate_on_upload: appInvalidateOnUpload.value,
+        },
+      },
+    })
+    showToast('Settings saved.')
+  } catch {
+    appConfigError.value = 'Failed to save settings.'
+  } finally {
+    appConfigSaving.value = false
+  }
+}
 
 // ── Theme / size / gap options ────────────────────────────────────────────────
 const themes: { value: AppTheme; label: string; icon: unknown }[] = [
@@ -368,7 +449,7 @@ const modes: { value: GalleryMode; label: string }[] = [
                   </div>
                 </section>
 
-                <section class="settings-section">
+                <section v-if="isAdmin" class="settings-section">
                   <h3 class="settings-section-title">AI Features</h3>
 
                   <div class="settings-ai-notice">
@@ -508,6 +589,11 @@ const modes: { value: GalleryMode; label: string }[] = [
                   </div><!-- /.settings-ai-features -->
                 </section>
 
+                <section v-if="!isAdmin" class="settings-section">
+                  <h3 class="settings-section-title">Features</h3>
+                  <p class="settings-hint">Feature settings are managed by your administrator.</p>
+                </section>
+
               </template>
 
               <!-- ── Storage ────────────────────────────────────────────── -->
@@ -523,12 +609,102 @@ const modes: { value: GalleryMode; label: string }[] = [
                 </section>
               </template>
 
-              <!-- ── Admin (stub) ─────────────────────────────────────── -->
+              <!-- ── Admin ───────────────────────────────────────────── -->
               <template v-else-if="activeTab === 'admin'">
+
                 <section class="settings-section">
-                  <h3 class="settings-section-title">Admin</h3>
-                  <p class="settings-coming-soon">Admin settings coming soon.</p>
+                  <h3 class="settings-section-title">Advanced</h3>
+
+                  <p v-if="appConfigLoading" class="settings-bg-loading">Loading…</p>
+                  <p v-if="appConfigError" class="settings-bg-error">{{ appConfigError }}</p>
+
+                  <div class="settings-field">
+                    <label class="settings-label">Cache behavior</label>
+                    <div class="settings-size-row">
+                      <button
+                        v-for="lvl in CACHE_LEVELS"
+                        :key="lvl.value"
+                        class="settings-size-btn"
+                        :class="{
+                          'is-active': appCacheLevel === lvl.value,
+                          'is-danger': lvl.value === 'off' && appCacheLevel === 'off',
+                        }"
+                        :disabled="appConfigSaving"
+                        @click="appCacheLevel = lvl.value"
+                      >
+                        {{ lvl.label }}
+                      </button>
+                    </div>
+                    <p class="settings-hint" :class="{ 'settings-hint-warn': appCacheLevel === 'off' }">
+                      {{ currentCacheLevelHint }}
+                    </p>
+                  </div>
+
+                  <template v-if="['extreme', 'high', 'medium'].includes(appCacheLevel)">
+                    <div class="settings-field">
+                      <label class="settings-label">Media list cache TTL</label>
+                      <div class="settings-ttl-row">
+                        <input
+                          v-model.number="appMediaTtl"
+                          type="number"
+                          min="30"
+                          max="3600"
+                          class="settings-ttl-input"
+                          :disabled="appConfigSaving"
+                        />
+                        <span class="settings-ttl-unit">seconds</span>
+                        <span class="settings-hint settings-ttl-hint">{{ Math.round(appMediaTtl / 60) }} min</span>
+                      </div>
+                    </div>
+
+                    <div class="settings-field">
+                      <label class="settings-label">Timeline cache TTL</label>
+                      <div class="settings-ttl-row">
+                        <input
+                          v-model.number="appTimelineTtl"
+                          type="number"
+                          min="30"
+                          max="3600"
+                          class="settings-ttl-input"
+                          :disabled="appConfigSaving"
+                        />
+                        <span class="settings-ttl-unit">seconds</span>
+                        <span class="settings-hint settings-ttl-hint">{{ Math.round(appTimelineTtl / 60) }} min</span>
+                      </div>
+                    </div>
+
+                    <div class="settings-field">
+                      <label class="settings-label settings-toggle-label">
+                        Invalidate cache on upload
+                        <button
+                          class="settings-toggle"
+                          :class="{ 'is-on': appInvalidateOnUpload }"
+                          role="switch"
+                          :aria-checked="appInvalidateOnUpload"
+                          :disabled="appConfigSaving"
+                          @click="appInvalidateOnUpload = !appInvalidateOnUpload"
+                        >
+                          <span class="settings-toggle-thumb" />
+                        </button>
+                      </label>
+                      <p class="settings-hint">
+                        Clear the cached gallery response for a library when new media is uploaded to it.
+                        If off, newly uploaded photos may not appear for up to {{ appMediaTtl }}s.
+                      </p>
+                    </div>
+                  </template>
+
+                  <div class="settings-field" style="margin-top: 8px;">
+                    <button
+                      class="settings-save-btn"
+                      :disabled="appConfigSaving || appConfigLoading"
+                      @click="saveAppConfig"
+                    >
+                      {{ appConfigSaving ? 'Saving…' : 'Save changes' }}
+                    </button>
+                  </div>
                 </section>
+
               </template>
 
               <!-- ── Sync ────────────────────────────────────────────────────────── -->
@@ -723,6 +899,86 @@ const modes: { value: GalleryMode; label: string }[] = [
 .settings-ai-features.is-disabled {
   opacity: 0.45;
   pointer-events: none;
+}
+
+/* Cache level — danger state (Off) */
+.settings-size-btn.is-danger {
+  background: #dc2626;
+  color: #fff;
+  border-color: #dc2626;
+}
+
+.settings-hint-warn {
+  color: #b45309;
+}
+
+/* TTL input row */
+.settings-ttl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.settings-ttl-input {
+  width: 80px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.settings-ttl-input:focus {
+  border-color: var(--color-accent);
+}
+
+.settings-ttl-input:disabled {
+  opacity: 0.5;
+}
+
+.settings-ttl-unit {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.settings-ttl-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+/* Save button */
+.settings-save-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  padding: 0 20px;
+  border-radius: 8px;
+  border: none;
+  background: var(--color-accent, #6366f1);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.settings-save-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.settings-save-btn:not(:disabled):hover {
+  opacity: 0.88;
 }
 
 /* Experimental badge */

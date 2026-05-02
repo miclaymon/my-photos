@@ -4,13 +4,15 @@ import os
 import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import engine, Base
 from app.middleware import LoopbackChunkMiddleware
 from app.routes import auth, library, media, albums, subjects, storage, admin
+from app.app_config import get_cache_config
+from app.dependencies import get_current_user
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -117,3 +119,17 @@ app.include_router(admin.router,    prefix="/api/v1/admin",    tags=["admin"])
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/v1/app-config/client")
+def client_app_config(current_user=Depends(get_current_user)):
+    """Public subset of config.json that the web client needs (no admin required)."""
+    try:
+        cache = get_cache_config()
+        level = cache.get("level", "high")
+        return {
+            "cache_level": level,
+            "preload_hints": level == "extreme",
+        }
+    except Exception:
+        return {"cache_level": "high", "preload_hints": False}

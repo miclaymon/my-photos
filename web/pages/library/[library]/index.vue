@@ -53,10 +53,19 @@ watch(sections, async (secs) => {
   recompute()
 }, { once: true })
 
+// Fetch client config to know whether preload hints are enabled (cache level === 'extreme').
+// Fire-and-forget: doesn't block the page render; will resolve before sections load.
+const _clientCfg = ref<{ preload_hints: boolean }>({ preload_hints: false })
+$fetch<{ cache_level: string; preload_hints: boolean }>('/api/v1/app-config/client')
+  .then(cfg => { _clientCfg.value = cfg })
+  .catch(() => {})
+
 // Preload the first ~20 thumbnails as soon as gallery data arrives so the
 // browser fetches them at high priority before <img loading="lazy"> tags are
 // even in the DOM. Fires once — we don't want to preload infinite-scroll pages.
+// Only runs when cache level is 'extreme' (opt-in via admin settings).
 watch(sections, (secs) => {
+  if (!_clientCfg.value.preload_hints) return
   const urls = secs
     .flatMap(s => s.items)
     .slice(0, 20)

@@ -140,6 +140,8 @@ Open [http://localhost:3000](http://localhost:3000) and sign in with the admin c
 | `CORS_ORIGINS_RAW` | No | `http://localhost:3000` | Comma-separated allowed origins. |
 | `CACHE_DB_PATH` | No | `./response_cache.db` | Path for the SQLite API response cache file. |
 
+> **Note:** Cache behaviour (level, TTL values, invalidate-on-upload) is configured at runtime via `api/config.json`, not via environment variables. Edit it directly or use the Settings → Admin → Advanced UI.
+
 ### `web/.env`
 
 | Variable | Required | Default | Description |
@@ -211,6 +213,9 @@ All API routes are versioned under `/api/v1/` and are implemented in the FastAPI
 | `GET`  | `/api/v1/admin/cache` | List all API response cache entries with path, TTL, and size (Admin only) |
 | `DELETE` | `/api/v1/admin/cache` | Clear all API response cache entries (Admin only) |
 | `DELETE` | `/api/v1/admin/cache/:key` | Remove a single cache entry by key (Admin only) |
+| `GET`  | `/api/v1/admin/app-config` | Read application runtime config (`config.json`) (Admin only) |
+| `PATCH` | `/api/v1/admin/app-config` | Update application runtime config (Admin only) |
+| `GET`  | `/api/v1/app-config/client` | Client-visible config subset: cache level and preload hints flag |
 
 ---
 
@@ -387,6 +392,7 @@ Albums are curated collections of media items within a library, with a defined s
 - **Gallery preload hints** — `<link rel="preload" as="image">` injected for the first 20 thumbnails on initial data load
 - **API response cache** — SQLite-backed TTL cache (`api/app/cache.py`) for `GET /{library_id}/media` (5 min) and `GET /{library_id}/timeline` (10 min); keyed on user + path + sorted params; auto-invalidated on any media mutation
 - **Admin cache UI** — Response Cache tab on `/admin/dev` shows all cache entries (endpoint+params, library, age, TTL remaining, size) with per-entry delete and clear-all; backed by new `GET/DELETE /api/v1/admin/cache` endpoints
+- **Cache settings** — Settings → Admin → Advanced: cache level selector (Extreme/High/Medium/Low/Off), configurable TTL values, invalidate-on-upload toggle; backed by `api/config.json` with a 30s in-memory TTL so changes take effect within seconds; `Cache-Control: private, max-age=<ttl>` headers added to gallery responses for browser-side caching
 - Three-tier monorepo restructure — `web/` (Nuxt BFF) + `api/` (FastAPI + PostgreSQL + Python workers)
 - People & Pets — face detection (insightface ArcFace 512-d), grouping, naming, cover photos, hide/unhide, preview overlays with click-to-name/navigate; subject re-clustering admin tool; gallery shows photo thumbnails, subject detail header shows face crop
 - Object detection — YOLOv8n bounding boxes on preview (admin setting), pet subject creation

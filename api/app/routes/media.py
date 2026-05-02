@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.cache import invalidate_library
+from app.app_config import get_cache_config
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
@@ -195,8 +196,9 @@ def complete_upload(
 
     db.commit()
     db.refresh(media)
-    for lid in body.library_ids:
-        invalidate_library(settings.cache_db_path, lid)
+    if get_cache_config().get("invalidate_on_upload", True):
+        for lid in body.library_ids:
+            invalidate_library(settings.cache_db_path, lid)
     enqueue_jobs(media.id, body.content_type, bool(body.hash), db)
     background_tasks.add_task(process_after_upload, media.id)
     return {"id": media.id}

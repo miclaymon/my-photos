@@ -1,0 +1,17 @@
+{
+  "_comment": "Application runtime configuration. Edit via the admin UI or directly. See AGENTS.md for details.",
+  "cache": {
+    "level": "extreme",
+    "_level_options": [
+      "extreme",
+      "high",
+      "medium",
+      "low",
+      "off"
+    ],
+    "_level_note": "extreme: SQLite cache + browser Cache-Control headers + client preload hints. high/medium: SQLite cache + browser Cache-Control headers. low: no SQLite cache. off: no cache + Cache-Control: no-store (not recommended).",
+    "media_ttl_seconds": 300,
+    "timeline_ttl_seconds": 600,
+    "invalidate_on_upload": true
+  }
+}
