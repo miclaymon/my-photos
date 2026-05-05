@@ -116,26 +116,30 @@ onMounted(() => {
     <div ref="galleryHeaderRef" class="gallery-header">
       <h1 class="gallery-title">{{ title }}</h1>
 
-      <div v-if="showModeToggle" class="gallery-mode-toggle" role="group" aria-label="Gallery display mode">
-        <button
-          class="gallery-mode-btn"
-          :class="{ 'is-active': galleryMode === 'masonry' }"
-          title="Justified layout"
-          :aria-pressed="galleryMode === 'masonry'"
-          @click="setMode('masonry')"
-        >
-          <LayoutIcon :size="16" />
-        </button>
-        <button
-          class="gallery-mode-btn"
-          :class="{ 'is-active': galleryMode === 'grid' }"
-          title="Grid layout"
-          :aria-pressed="galleryMode === 'grid'"
-          @click="setMode('grid')"
-        >
-          <LayoutGridIcon :size="16" />
-        </button>
-      </div>
+      <!-- ClientOnly: galleryMode comes from localStorage; server always returns the
+           default so the is-active class would mismatch on client hydration. -->
+      <ClientOnly v-if="showModeToggle">
+        <div class="gallery-mode-toggle" role="group" aria-label="Gallery display mode">
+          <button
+            class="gallery-mode-btn"
+            :class="{ 'is-active': galleryMode === 'masonry' }"
+            title="Justified layout"
+            :aria-pressed="galleryMode === 'masonry'"
+            @click="setMode('masonry')"
+          >
+            <LayoutIcon :size="16" />
+          </button>
+          <button
+            class="gallery-mode-btn"
+            :class="{ 'is-active': galleryMode === 'grid' }"
+            title="Grid layout"
+            :aria-pressed="galleryMode === 'grid'"
+            @click="setMode('grid')"
+          >
+            <LayoutGridIcon :size="16" />
+          </button>
+        </div>
+      </ClientOnly>
     </div>
 
     <!-- Top sentinel — triggers loadNewer when scrolled into view -->

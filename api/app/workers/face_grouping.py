@@ -236,8 +236,13 @@ def _save_face_crop(
 
         buf = io.BytesIO()
         crop.save(buf, format="WEBP", quality=85)
-        buf.seek(0)
 
+        # Re-compress at lower quality if the crop exceeds 8 KB
+        if buf.tell() > 8192:
+            buf = io.BytesIO()
+            crop.save(buf, format="WEBP", quality=65, method=6)
+
+        buf.seek(0)
         object_key = f"{media_id}/faces/{detection_id}/face.webp"
         put_object_bytes(object_key, buf.read(), content_type="image/webp")
         return object_key

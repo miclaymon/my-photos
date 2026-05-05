@@ -28,6 +28,11 @@ from app.worker_config import is_enabled
 
 logger = logging.getLogger(__name__)
 
+# Thumbnail sizes generated for every media item (width and height bounded by this value)
+THUMB_SIZES = [64, 96, 128, 256, 512]
+# WebP quality per size — smaller sizes tolerate more compression
+_THUMB_QUALITY: dict[int, int] = {64: 80, 96: 75, 128: 70, 256: 60, 512: 55}
+
 
 # ---------------------------------------------------------------------------
 # Public entry points
@@ -97,23 +102,75 @@ def enqueue_jobs(
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Storage key helpers
 # ---------------------------------------------------------------------------
 
-def _thumb_key(object_key: str) -> str:
+def thumb_base_key(object_key: str) -> str:
     """
-    Replace the filename portion of *object_key* with 'thumb.jpg'.
-    e.g. '42/uuid/photo.jpg' -> '42/uuid/thumb.jpg'
+    Return the thumbnail base prefix for a given object key.
+    For new-format keys  ({uid}/{uuid}/media/{file}) → "{uid}/{uuid}/thumb"
+    For legacy-format keys ({uid}/{uuid}/{file}) → "{uid}/{uuid}/thumb"
     """
-    prefix = object_key.rsplit("/", 1)[0]
-    return f"{prefix}/thumb.jpg"
+    parts = object_key.split("/")
+    if len(parts) >= 4 and parts[2] == "media":
+        return f"{parts[0]}/{parts[1]}/thumb"
+    # Legacy: {uid}/{uuid}/{file}
+    return "/".join(parts[:2]) + "/thumb"
+
+
+def thumb_size_key(base_key: str, size: int) -> str:
+    """Full S3 key for a specific thumbnail size."""
+    return f"{base_key}/{size}.webp"
 
 
 def _preview_key(object_key: str) -> str:
-    """Replace the filename portion with 'preview.mp4'."""
-    prefix = object_key.rsplit("/", 1)[0]
-    return f"{prefix}/preview.mp4"
+    """
+    Return the preview clip key for a given object key.
+    Always at {uid}/{uuid}/preview.mp4 regardless of new/legacy media path.
+    """
+    parts = object_key.split("/")
+    if len(parts) >= 4 and parts[2] == "media":
+        return f"{parts[0]}/{parts[1]}/preview.mp4"
+    return "/".join(parts[:2]) + "/preview.mp4"
 
+
+# ---------------------------------------------------------------------------
+# Thumbnail generation helpers
+# ---------------------------------------------------------------------------
+
+def generate_thumbnails(img: Image.Image, client, base_key: str) -> None:
+    """
+    Generate THUMB_SIZES WebP thumbnails from a PIL image and upload to S3.
+    Each thumbnail is bounded to (size × size) preserving aspect ratio.
+    Targets aggressive compression (~4 KB or less for small sizes).
+    """
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGB")
+    elif img.mode == "RGBA":
+        # Flatten alpha onto white for JPEG-like compat
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        img = bg
+
+    for size in THUMB_SIZES:
+        thumb = img.copy()
+        thumb.thumbnail((size, size), Image.Resampling.LANCZOS)
+        if thumb.mode != "RGB":
+            thumb = thumb.convert("RGB")
+        buf = io.BytesIO()
+        quality = _THUMB_QUALITY.get(size, 60)
+        thumb.save(buf, format="WEBP", quality=quality, method=6)
+        client.put_object(
+            Bucket=settings.storage_bucket_name,
+            Key=thumb_size_key(base_key, size),
+            Body=buf.getvalue(),
+            ContentType="image/webp",
+        )
+
+
+# ---------------------------------------------------------------------------
+# EXIF helpers
+# ---------------------------------------------------------------------------
 
 _GPS_IFD_TAG = 34853  # PIL numeric tag ID for the GPSInfo sub-IFD
 
@@ -179,8 +236,12 @@ def _parse_exif_datetime(raw: str) -> Optional[datetime]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Per-content-type processors
+# ---------------------------------------------------------------------------
+
 def _process_image(media: Media, data: bytes, db: Session) -> None:
-    """Extract EXIF, generate a thumbnail, upload it, and update the DB row."""
+    """Extract EXIF, generate multi-size WebP thumbnails, upload, and update the DB row."""
     try:
         img = Image.open(io.BytesIO(data))
         # Extract EXIF from the original image before exif_transpose, because
@@ -198,27 +259,13 @@ def _process_image(media: Media, data: bytes, db: Session) -> None:
             if raw_dt and isinstance(raw_dt, str):
                 taken_at = _parse_exif_datetime(raw_dt)
 
-        # Generate thumbnail
-        thumb_img = img.copy()
-        thumb_img.thumbnail((600, 600), Image.Resampling.LANCZOS)
-        if thumb_img.mode != "RGB":
-            thumb_img = thumb_img.convert("RGB")
-        thumb_buf = io.BytesIO()
-        thumb_img.save(thumb_buf, format="JPEG", quality=85)
-        thumb_bytes = thumb_buf.getvalue()
-
-        # Upload thumbnail
-        thumb_key = _thumb_key(media.object_key)
+        # Generate and upload all thumbnail sizes
+        base_key = thumb_base_key(media.object_key)
         client = get_s3_client()
-        client.put_object(
-            Bucket=settings.storage_bucket_name,
-            Key=thumb_key,
-            Body=thumb_bytes,
-            ContentType="image/jpeg",
-        )
+        generate_thumbnails(img, client, base_key)
 
         # Persist updates
-        media.thumbnail_object_key = thumb_key
+        media.thumbnail_base_key = base_key
         media.width = width
         media.height = height
         media.aspect_ratio = width / height if height else None
@@ -234,7 +281,6 @@ def _process_image(media: Media, data: bytes, db: Session) -> None:
 
     except Exception:
         logger.exception("_process_image failed for media %s", media.id)
-        # Roll back any partial state so the session remains usable
         try:
             db.rollback()
         except Exception:
@@ -296,7 +342,7 @@ def _apply_faststart(media: Media, tmp_path: str) -> None:
 def _process_video(media: Media, data: bytes, db: Session) -> None:
     """
     Probe video metadata, extract a thumbnail frame (and optional 5s preview
-    clip), upload them to S3, and update the DB row.
+    clip), generate multi-size WebP thumbnails, upload to S3, and update the DB row.
 
     Requires ffmpeg-python and a working ffmpeg binary. If ffmpeg is
     unavailable the function logs a warning and returns without failing the
@@ -350,7 +396,7 @@ def _process_video(media: Media, data: bytes, db: Session) -> None:
 
         seek_pos = min(1.0, duration / 2) if duration > 0 else 0.0
 
-        # Extract thumbnail frame
+        # Extract thumbnail frame as JPEG, then convert to multi-size WebP
         thumb_tmp = tmp_path + "_thumb.jpg"
         try:
             (
@@ -371,15 +417,14 @@ def _process_video(media: Media, data: bytes, db: Session) -> None:
             with open(thumb_tmp, "rb") as fh:
                 thumb_bytes = fh.read()
 
-            thumb_key = _thumb_key(media.object_key)
-            client = get_s3_client()
-            client.put_object(
-                Bucket=settings.storage_bucket_name,
-                Key=thumb_key,
-                Body=thumb_bytes,
-                ContentType="image/jpeg",
-            )
-            media.thumbnail_object_key = thumb_key
+            try:
+                frame_img = Image.open(io.BytesIO(thumb_bytes)).convert("RGB")
+                base_key = thumb_base_key(media.object_key)
+                client = get_s3_client()
+                generate_thumbnails(frame_img, client, base_key)
+                media.thumbnail_base_key = base_key
+            except Exception:
+                logger.exception("thumbnail generation from video frame failed for media %s", media.id)
 
         # Optional 5-second preview clip (only for longer videos)
         if duration > 10:
@@ -449,11 +494,6 @@ def _process_video(media: Media, data: bytes, db: Session) -> None:
         if taken_at is not None:
             media.taken_at = taken_at
         db.commit()
-
-        # Enqueue geocoding if GPS info is embedded (rare for video but possible)
-        # Video geocoding is handled by the location_geocode worker from format tags
-        # if the creation_time suggests a GPS-tagged format; omitted here as it's not
-        # standard in video EXIF the way it is for images.
 
     except Exception:
         logger.exception("_process_video failed for media %s", media.id)

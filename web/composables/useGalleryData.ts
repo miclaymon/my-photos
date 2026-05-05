@@ -9,8 +9,16 @@ export interface MediaItem {
   originalFilename: string
   /** Presigned URL to the full-resolution source (image or video). */
   src?:             string
-  /** Presigned URL to the extracted thumbnail image. Stable within a 1-hour window (see s3.py). */
+  /**
+   * Presigned URL to the best single thumbnail (256px or legacy thumb).
+   * Kept for backward compat — prefer `thumbnails` when available.
+   */
   thumbnailSrc?:    string
+  /**
+   * Multi-size thumbnails keyed by pixel size: "64" | "96" | "128" | "256" | "512".
+   * Only present for items processed after the multi-size thumbnail migration.
+   */
+  thumbnails?:      Record<string, string>
   /**
    * Presigned URL to the short low-res preview clip (video items only).
    * Shown on tile hover. Populated by the background ffmpeg job.
@@ -186,6 +194,7 @@ type LibraryMediaItem = {
   duration_seconds?: number
   src?:              string | null
   thumbnail_src?:    string | null
+  thumbnails?:       Record<string, string> | null
   preview_src?:      string | null
 }
 
@@ -271,12 +280,17 @@ function _mapItem(item: LibraryMediaItem, prevById: Map<string, MediaItem>): Med
                         ? formatDuration(Math.round(item.duration_seconds)) : undefined,
     src:          prev?.src          ?? item.src          ?? blobUrl ?? undefined,
     thumbnailSrc: prev?.thumbnailSrc ?? item.thumbnail_src ?? undefined,
+    thumbnails:   prev?.thumbnails   ?? item.thumbnails   ?? undefined,
     previewSrc:   prev?.previewSrc   ?? item.preview_src  ?? undefined,
   }
 }
 
-async function _fetchPage(libraryId: string, params: Record<string, string>): Promise<LibraryMediaPage> {
-  const qs = new URLSearchParams(params).toString()
+async function _fetchPage(libraryId: string, params: Record<string, string>, thumbnailSizes?: number[]): Promise<LibraryMediaPage> {
+  const allParams = { ...params }
+  if (thumbnailSizes && thumbnailSizes.length > 0) {
+    allParams.thumbnail_sizes = thumbnailSizes.join(',')
+  }
+  const qs = new URLSearchParams(allParams).toString()
   return $fetch<LibraryMediaPage>(`/api/v1/library/${libraryId}/media${qs ? '?' + qs : ''}`)
 }
 
@@ -291,7 +305,7 @@ function _cleanProvisionals(loadedIds: Set<string>) {
  * a specific date (e.g. from the URL hash).  Loads 200 items from the anchor
  * backward, plus 50 items newer than the anchor for context above.
  */
-export async function initGallery(libraryId: string, anchorDate?: string | null) {
+export async function initGallery(libraryId: string, anchorDate?: string | null, thumbnailSizes?: number[]) {
   if (_initializing.value) return
   _initializing.value = true
 
@@ -312,7 +326,7 @@ export async function initGallery(libraryId: string, anchorDate?: string | null)
       params.before = d.toISOString().slice(0, 19)
     }
 
-    const page     = await _fetchPage(libraryId, params)
+    const page     = await _fetchPage(libraryId, params, thumbnailSizes)
     const prevById = new Map(realItems.value.map(i => [i.id, i]))
     const items    = page.items.map(i => _mapItem(i, prevById))
 
@@ -325,7 +339,7 @@ export async function initGallery(libraryId: string, anchorDate?: string | null)
     // the user can scroll up to reach recent content without a hard boundary.
     if (anchorDate && page.has_newer && page.newer_cursor) {
       try {
-        const newerPage  = await _fetchPage(libraryId, { limit: '50', after: page.newer_cursor })
+        const newerPage  = await _fetchPage(libraryId, { limit: '50', after: page.newer_cursor }, thumbnailSizes)
         const newerItems = newerPage.items.map(i => _mapItem(i, prevById))
         allItems            = [...newerItems, ...items]
         _newerCursor.value  = newerPage.newer_cursor
@@ -353,11 +367,11 @@ export async function initGallery(libraryId: string, anchorDate?: string | null)
 }
 
 /** Load the next batch of older items (scroll-down infinite scroll). */
-export async function loadOlderMedia(libraryId: string) {
+export async function loadOlderMedia(libraryId: string, thumbnailSizes?: number[]) {
   if (!_olderCursor.value || _loadingOlder.value || !_hasMoreOlder.value) return
   _loadingOlder.value = true
   try {
-    const page     = await _fetchPage(libraryId, { limit: '50', before: _olderCursor.value })
+    const page     = await _fetchPage(libraryId, { limit: '50', before: _olderCursor.value }, thumbnailSizes)
     const prevById = new Map(realItems.value.map(i => [i.id, i]))
     const newItems = page.items.map(i => _mapItem(i, prevById))
     const existing = new Set(realItems.value.map(i => i.id))
@@ -373,11 +387,11 @@ export async function loadOlderMedia(libraryId: string) {
 }
 
 /** Load the next batch of newer items (scroll-up infinite scroll). */
-export async function loadNewerMedia(libraryId: string) {
+export async function loadNewerMedia(libraryId: string, thumbnailSizes?: number[]) {
   if (!_newerCursor.value || _loadingNewer.value || !_hasMoreNewer.value) return
   _loadingNewer.value = true
   try {
-    const page     = await _fetchPage(libraryId, { limit: '50', after: _newerCursor.value })
+    const page     = await _fetchPage(libraryId, { limit: '50', after: _newerCursor.value }, thumbnailSizes)
     const prevById = new Map(realItems.value.map(i => [i.id, i]))
     const newItems = page.items.map(i => _mapItem(i, prevById))
     const existing = new Set(realItems.value.map(i => i.id))

@@ -24,7 +24,8 @@ class Media(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     # Processing outputs
-    thumbnail_object_key: Mapped[str | None]     = mapped_column(Text)
+    thumbnail_object_key: Mapped[str | None]     = mapped_column(Text)  # legacy single-thumb key
+    thumbnail_base_key:   Mapped[str | None]     = mapped_column(Text)  # new: "{uid}/{uuid}/thumb" prefix
     preview_object_key:   Mapped[str | None]     = mapped_column(Text)
     exif_data:            Mapped[dict | None]    = mapped_column(JSONB)   # PostgreSQL JSONB (was TEXT in SQLite)
     hash:                 Mapped[str | None]     = mapped_column(String(64))  # SHA-256

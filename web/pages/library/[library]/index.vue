@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ArchiveIcon, Trash2Icon, GalleryHorizontalIcon, UploadIcon, LayoutIcon, BookmarkPlusIcon, HeartIcon, TagIcon, LockIcon } from 'lucide-vue-next'
+import { useGalleryConfig, thumbSizesForGallery } from '~/composables/useGallery'
 
 definePageMeta({ middleware: 'auth', keepalive: true })
 
@@ -17,23 +18,30 @@ const { addFiles }                          = useUpload()
 const { selectedIds, exitSelectionMode }    = useGallery()
 const { showToast }                         = useToast()
 
-// Only use the URL hash as an anchor on the very first load (page open / refresh).
-// On subsequent library switches, always load from newest so we don't teleport
-// the user to an unrelated date from a previously-viewed library.
-let _isFirstLoad = true
+// Access gallery config directly (same localStorage key as PhotoGallery) so we
+// can compute thumbnail sizes before the PhotoGallery component mounts.
+const _galleryConfig = useGalleryConfig('photos-and-videos')
+const _thumbSizes    = computed(() => thumbSizesForGallery(_galleryConfig.galleryMode.value, _galleryConfig.gallerySize.value))
 
-// Sync URL param → active library state; reload real media when library changes
 const librarySlug = computed(() => route.params.library as string)
-watch(librarySlug, (id) => {
-  setActiveLibrary(id)
-  if (_isFirstLoad) {
-    _isFirstLoad = false
-    const anchorDate = route.hash?.match(/^#(\d{4}-\d{2}-\d{2})$/)?.[1] ?? undefined
-    initGallery(id, anchorDate)
-  } else {
-    initGallery(id)
-  }
-}, { immediate: true })
+
+// SSR-safe: set active library for layout/nav without fetching gallery data.
+watch(librarySlug, (id) => { setActiveLibrary(id) }, { immediate: true })
+
+// Client-only: fetch gallery data after hydration so localStorage-based
+// thumbnail_sizes (from useGalleryConfig) match between server and client,
+// preventing Vue hydration mismatches.
+onMounted(() => {
+  const id = librarySlug.value
+  const anchorDate = route.hash?.match(/^#(\d{4}-\d{2}-\d{2})$/)?.[1] ?? undefined
+  initGallery(id, anchorDate, _thumbSizes.value)
+})
+
+// Navigation between libraries after initial mount.
+watch(librarySlug, (id, prevId) => {
+  if (!prevId || id === prevId) return
+  initGallery(id, undefined, _thumbSizes.value)
+})
 
 // ── Scroll tracking + date hash ───────────────────────────────────────────
 onMounted(() => { mountScrollTracking() })
@@ -88,11 +96,11 @@ watch(activeStickyKey, (key) => {
 
 // ── Infinite scroll handlers ──────────────────────────────────────────────
 function handleLoadOlder() {
-  if (hasMoreOlder.value && !isLoadingOlder.value) loadOlderMedia(activeLibraryId.value)
+  if (hasMoreOlder.value && !isLoadingOlder.value) loadOlderMedia(activeLibraryId.value, _thumbSizes.value)
 }
 
 function handleLoadNewer() {
-  if (hasMoreNewer.value && !isLoadingNewer.value) loadNewerMedia(activeLibraryId.value)
+  if (hasMoreNewer.value && !isLoadingNewer.value) loadNewerMedia(activeLibraryId.value, _thumbSizes.value)
 }
 
 // ── Selection actions ─────────────────────────────────────────────────────

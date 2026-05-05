@@ -42,14 +42,20 @@ interface BucketObject {
 }
 
 interface BucketGroup {
-  prefix:       string
-  mainObject:   BucketObject | null
-  thumbObject:  BucketObject | null
-  faceObjects:  BucketObject[]
-  extras:       BucketObject[]
-  totalSize:    number
-  lastModified: string | null
-  isOrphan:     boolean
+  prefix:         string
+  /** User ID extracted from the bucket prefix (first path segment). */
+  userId:         string
+  /** Media UUID extracted from the bucket prefix (second path segment). */
+  uuid:           string
+  mainObject:     BucketObject | null   // latest media file
+  thumbObjects:   BucketObject[]        // /thumb/{size}.webp files
+  faceObjects:    BucketObject[]        // /faces/{id}/face.webp files
+  versionObjects: BucketObject[]        // /media/v{n}/ delta files
+  previewObject:  BucketObject | null   // preview.mp4
+  extras:         BucketObject[]        // unclassified
+  totalSize:      number
+  lastModified:   string | null
+  isOrphan:       boolean
 }
 
 interface LibraryAccessEntry {
@@ -700,7 +706,17 @@ async function confirmBulkDeleteMedia() {
 
 // ── Bucket grouping ────────────────────────────────────────────────────────────
 
+// New path format: {uid}/{uuid}/media/{file}  → main media
+//                  {uid}/{uuid}/thumb/{size}.webp → thumbnail
+//                  {uid}/{uuid}/media/v{n}/{delta} → version delta
+//                  {uid}/{uuid}/preview.mp4 → preview clip
+// Legacy:          {uid}/{uuid}/{file} → main media (no /media/ subfolder)
+//                  {uid}/{uuid}/thumb.jpg → single thumbnail
+
 function isThumbKey(key: string): boolean {
+  // New: /thumb/ subdirectory
+  if (key.includes('/thumb/')) return true
+  // Legacy: thumb.jpg / thumb.* at prefix root
   const name = key.split('/').pop() ?? ''
   return name === 'thumb.jpg' || name.startsWith('thumb.')
 }
@@ -709,14 +725,25 @@ function isFaceKey(key: string): boolean {
   return key.includes('/faces/')
 }
 
-function shortGroupPrefix(prefix: string): string {
-  const parts = prefix.split('/')
-  if (parts.length >= 3) return `${parts[0]}/${parts[1].slice(0, 8)}…/`
-  return prefix
+function isVersionKey(key: string): boolean {
+  return /\/media\/v\d+\//.test(key)
+}
+
+function isPreviewKey(key: string): boolean {
+  return key.endsWith('/preview.mp4')
+}
+
+function isMainMediaKey(key: string): boolean {
+  // New: {uid}/{uuid}/media/{file} — exactly 4 parts, third part is 'media', fourth is a filename
+  const parts = key.split('/')
+  if (parts.length === 4 && parts[2] === 'media') return true
+  // Legacy: {uid}/{uuid}/{file} — exactly 3 parts, not a recognized special file
+  if (parts.length === 3 && !isThumbKey(key) && !isPreviewKey(key) && !isFaceKey(key)) return true
+  return false
 }
 
 function groupMainFilename(group: BucketGroup): string {
-  if (!group.mainObject) return group.thumbObject ? '(thumbnail only)' : '—'
+  if (!group.mainObject) return group.thumbObjects.length ? '(thumbnail only)' : '—'
   return group.mainObject.key.split('/').pop() ?? group.mainObject.key
 }
 
@@ -728,31 +755,50 @@ const bucketGroups = computed((): BucketGroup[] => {
   const groupMap = new Map<string, BucketObject[]>()
   for (const obj of objects) {
     const parts  = obj.key.split('/')
-    const prefix = parts.length >= 3 ? `${parts[0]}/${parts[1]}/` : `${obj.key}/`
+    // Always group by first two segments: {uid}/{uuid}/
+    const prefix = parts.length >= 2 ? `${parts[0]}/${parts[1]}/` : `${obj.key}/`
     if (!groupMap.has(prefix)) groupMap.set(prefix, [])
     groupMap.get(prefix)!.push(obj)
   }
 
   return Array.from(groupMap.entries()).map(([prefix, objs]) => {
-    const thumbObject  = objs.find(o => isThumbKey(o.key)) ?? null
-    const faceObjects  = objs.filter(o => isFaceKey(o.key))
-    const mainObject   = objs.find(o => !isThumbKey(o.key) && !isFaceKey(o.key)) ?? null
-    const extras       = objs.filter(o => o !== thumbObject && o !== mainObject && !faceObjects.includes(o))
-    const totalSize    = objs.reduce((s, o) => s + o.size, 0)
-    const lastModified = objs.reduce<string | null>((latest, o) => {
+    const parts         = prefix.split('/')
+    const userId        = parts[0] ?? ''
+    const uuid          = parts[1] ?? ''
+    const thumbObjects  = objs.filter(o => isThumbKey(o.key))
+    const faceObjects   = objs.filter(o => isFaceKey(o.key))
+    const versionObjects = objs.filter(o => isVersionKey(o.key))
+    const previewObject = objs.find(o => isPreviewKey(o.key)) ?? null
+    const mainObject    = objs.find(o => isMainMediaKey(o.key)) ?? null
+    const classified    = new Set([...thumbObjects, ...faceObjects, ...versionObjects, previewObject, mainObject].filter(Boolean) as BucketObject[])
+    const extras        = objs.filter(o => !classified.has(o))
+    const totalSize     = objs.reduce((s, o) => s + o.size, 0)
+    const lastModified  = objs.reduce<string | null>((latest, o) => {
       if (!o.last_modified) return latest
       return !latest || o.last_modified > latest ? o.last_modified : latest
     }, null)
     return {
-      prefix, mainObject, thumbObject, faceObjects, extras, totalSize, lastModified,
+      prefix, userId, uuid, mainObject, thumbObjects, faceObjects, versionObjects, previewObject, extras, totalSize, lastModified,
       isOrphan: !mainObject || !dbKeys.has(mainObject.key),
     }
   })
 })
 
+// Map from string user_id → uploader_email, derived from the media table
+const userEmailMap = computed((): Map<string, string> => {
+  const m = new Map<string, string>()
+  for (const row of (data.value?.media ?? [])) {
+    if (row.uploader_email && row.object_key) {
+      const uid = row.object_key.split('/')[0]
+      if (uid) m.set(uid, row.uploader_email)
+    }
+  }
+  return m
+})
+
 // ── Bucket table controls ──────────────────────────────────────────────────────
 
-const bucketShowThumbs = ref(false)
+const bucketExpanded   = ref<Set<string>>(new Set())
 const bucketFilter     = ref('')
 const bucketSortKey    = ref('lastModified')
 const bucketSortDir    = ref<'asc' | 'desc'>('desc')
@@ -770,8 +816,9 @@ const filteredBucketGroups = computed(() => {
   const q = bucketFilter.value.toLowerCase().trim()
   if (!q) return bucketGroups.value
   return bucketGroups.value.filter(g =>
-    g.prefix.toLowerCase().includes(q) ||
-    (g.mainObject?.key ?? '').toLowerCase().includes(q),
+    g.uuid.toLowerCase().includes(q) ||
+    groupMainFilename(g).toLowerCase().includes(q) ||
+    (userEmailMap.value.get(g.userId) ?? '').toLowerCase().includes(q),
   )
 })
 
@@ -802,6 +849,12 @@ function toggleBucketSelect(prefix: string) {
   const s = new Set(bucketSelected.value)
   s.has(prefix) ? s.delete(prefix) : s.add(prefix)
   bucketSelected.value = s
+}
+
+function toggleBucketExpand(prefix: string) {
+  const s = new Set(bucketExpanded.value)
+  s.has(prefix) ? s.delete(prefix) : s.add(prefix)
+  bucketExpanded.value = s
 }
 
 function toggleSelectAllPageBucket() {
@@ -838,13 +891,15 @@ async function confirmDeleteBucketGroup() {
         body:   { key: group.mainObject.key, delete_db_record: deleteBucketDbRec.value },
       })
     }
-    if (deleteBucketThumb.value && group.thumbObject) {
-      await $fetch('/api/v1/admin/bucket/delete', {
-        method: 'POST',
-        body:   { key: group.thumbObject.key, delete_db_record: false },
-      })
+    if (deleteBucketThumb.value) {
+      for (const t of group.thumbObjects) {
+        await $fetch('/api/v1/admin/bucket/delete', {
+          method: 'POST',
+          body:   { key: t.key, delete_db_record: false },
+        })
+      }
     }
-    for (const extra of group.extras) {
+    for (const extra of [...group.extras, ...group.versionObjects, group.previewObject].filter(Boolean) as BucketObject[]) {
       await $fetch('/api/v1/admin/bucket/delete', {
         method: 'POST', body: { key: extra.key, delete_db_record: false },
       })
@@ -880,11 +935,13 @@ async function confirmBulkDeleteBucket() {
           body:   { key: group.mainObject.key, delete_db_record: bulkDeleteBucketDb.value },
         })
       }
-      if (bulkDeleteBucketThumb.value && group.thumbObject) {
-        await $fetch('/api/v1/admin/bucket/delete', {
-          method: 'POST',
-          body:   { key: group.thumbObject.key, delete_db_record: false },
-        })
+      if (bulkDeleteBucketThumb.value) {
+        for (const t of group.thumbObjects) {
+          await $fetch('/api/v1/admin/bucket/delete', {
+            method: 'POST',
+            body:   { key: t.key, delete_db_record: false },
+          })
+        }
       }
     }
     bucketSelected.value       = new Set()
@@ -1283,16 +1340,12 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
           <RefreshCwIcon :size="15" />
           Refresh
         </button>
-        <label class="dev-toolbar-check-label">
-          <input v-model="bucketShowThumbs" type="checkbox" />
-          Show thumbnails
-        </label>
-        <input v-model="bucketFilter" class="dev-filter-input" placeholder="Filter by key…" />
+        <input v-model="bucketFilter" class="dev-filter-input" placeholder="Filter by UUID or filename…" />
         <select v-model="bucketPageSize" class="dev-page-size-select">
           <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }} / page</option>
         </select>
         <span v-if="bucketData" class="dev-muted" style="font-size:11px;white-space:nowrap">
-          {{ bucketGroups.length }} group{{ bucketGroups.length !== 1 ? 's' : '' }} ({{ bucketData.count }} files)
+          {{ bucketGroups.length }} item{{ bucketGroups.length !== 1 ? 's' : '' }} ({{ bucketData.count }} files)
         </span>
         <button
           v-if="bucketSelected.size > 0"
@@ -1350,26 +1403,63 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
                       @change="toggleBucketSelect(group.prefix)"
                     />
                   </td>
+                  <!-- Preview thumbnail -->
                   <td class="dev-table-thumb-cell">
                     <button
-                      v-if="group.thumbObject?.src || group.mainObject?.src"
+                      v-if="group.thumbObjects[0]?.src || group.mainObject?.src"
                       class="dev-thumb-btn"
-                      @click="previewSrc = group.thumbObject?.src ?? group.mainObject?.src ?? null"
+                      @click="previewSrc = group.thumbObjects[0]?.src ?? group.mainObject?.src ?? null"
                     >
                       <img
-                        :src="group.thumbObject?.src ?? group.mainObject?.src ?? undefined"
+                        :src="group.thumbObjects[0]?.src ?? group.mainObject?.src ?? undefined"
                         class="dev-thumb lazy-img"
                         @load="(e) => (e.target as HTMLImageElement).classList.add('is-loaded')"
                       />
                     </button>
                     <span v-else class="dev-thumb-placeholder">—</span>
                   </td>
+                  <!-- Main info cell -->
                   <td>
-                    <code class="dev-object-key">{{ shortGroupPrefix(group.prefix) }}</code>
-                    <span class="dev-bucket-main-filename">{{ groupMainFilename(group) }}</span>
-                    <span v-if="group.thumbObject" class="dev-bucket-has-thumb">+ thumb</span>
-                    <span v-if="group.faceObjects.length" class="dev-bucket-has-thumb" style="color:#a78bfa">+ {{ group.faceObjects.length }} face{{ group.faceObjects.length === 1 ? '' : 's' }}</span>
-                    <span v-if="group.extras.length" class="dev-muted" style="font-size:10px"> +{{ group.extras.length }} more</span>
+                    <!-- Row header: UUID + user badge -->
+                    <div class="dev-bucket-row-header">
+                      <code class="dev-bucket-uuid" :title="group.prefix">{{ group.uuid }}</code>
+                      <span v-if="userEmailMap.get(group.userId)" class="dev-bucket-user-badge">
+                        {{ userEmailMap.get(group.userId) }}
+                      </span>
+                    </div>
+                    <!-- Filename -->
+                    <div class="dev-bucket-filename">{{ groupMainFilename(group) }}</div>
+                    <!-- Child-count badges + expand toggle -->
+                    <div class="dev-bucket-badges">
+                      <button
+                        v-if="group.versionObjects.length"
+                        class="dev-bucket-badge dev-bucket-badge-version"
+                        @click.stop="toggleBucketExpand(group.prefix)"
+                      >
+                        {{ group.versionObjects.length }} version{{ group.versionObjects.length !== 1 ? 's' : '' }}
+                      </button>
+                      <button
+                        v-if="group.thumbObjects.length"
+                        class="dev-bucket-badge dev-bucket-badge-thumb"
+                        @click.stop="toggleBucketExpand(group.prefix)"
+                      >
+                        {{ group.thumbObjects.length }} thumbnail{{ group.thumbObjects.length !== 1 ? 's' : '' }}
+                      </button>
+                      <button
+                        v-if="group.faceObjects.length"
+                        class="dev-bucket-badge dev-bucket-badge-face"
+                        @click.stop="toggleBucketExpand(group.prefix)"
+                      >
+                        {{ group.faceObjects.length }} face{{ group.faceObjects.length !== 1 ? 's' : '' }}
+                      </button>
+                      <button
+                        v-if="group.previewObject"
+                        class="dev-bucket-badge dev-bucket-badge-preview"
+                        @click.stop="previewSrc = group.previewObject?.src ?? null"
+                      >
+                        preview
+                      </button>
+                    </div>
                   </td>
                   <td class="dev-mono">{{ formatBytes(group.totalSize) }}</td>
                   <td class="dev-mono">{{ relativeTime(group.lastModified) }}</td>
@@ -1383,41 +1473,69 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
                     </button>
                   </td>
                 </tr>
-                <!-- Thumbnail sub-row -->
-                <tr v-if="bucketShowThumbs && group.thumbObject" class="dev-bucket-child-row">
-                  <td></td>
-                  <td></td>
-                  <td>
-                    <span class="dev-bucket-child-indent">↳</span>
-                    <code class="dev-object-key" style="display:inline">{{ group.thumbObject.key.split('/').pop() }}</code>
-                  </td>
-                  <td class="dev-mono">{{ formatBytes(group.thumbObject.size) }}</td>
-                  <td class="dev-mono">{{ relativeTime(group.thumbObject.last_modified) }}</td>
-                  <td><span class="dev-muted" style="font-size:10px">thumbnail</span></td>
-                  <td></td>
-                </tr>
-                <!-- Face crop sub-rows -->
-                <tr
-                  v-for="face in (bucketShowThumbs ? group.faceObjects : [])"
-                  :key="face.key"
-                  class="dev-bucket-child-row"
-                >
-                  <td></td>
-                  <td class="dev-table-thumb-cell">
-                    <button v-if="face.src" class="dev-thumb-btn" @click="previewSrc = face.src">
-                      <img :src="face.src" class="dev-thumb lazy-img" style="border-radius:50%;object-fit:cover" @load="(e) => (e.target as HTMLImageElement).classList.add('is-loaded')" />
-                    </button>
-                    <span v-else class="dev-thumb-placeholder">—</span>
-                  </td>
-                  <td>
-                    <span class="dev-bucket-child-indent">↳</span>
-                    <code class="dev-object-key" style="display:inline">{{ face.key.split('/').pop() }}</code>
-                  </td>
-                  <td class="dev-mono">{{ formatBytes(face.size) }}</td>
-                  <td class="dev-mono">{{ relativeTime(face.last_modified) }}</td>
-                  <td><span class="dev-muted" style="font-size:10px;color:#a78bfa">face crop</span></td>
-                  <td></td>
-                </tr>
+                <!-- Accordion: thumbnails -->
+                <template v-if="bucketExpanded.has(group.prefix)">
+                  <tr
+                    v-for="thumb in group.thumbObjects"
+                    :key="thumb.key"
+                    class="dev-bucket-child-row"
+                  >
+                    <td></td>
+                    <td class="dev-table-thumb-cell">
+                      <button v-if="thumb.src" class="dev-thumb-btn" @click="previewSrc = thumb.src">
+                        <img :src="thumb.src" class="dev-thumb lazy-img" @load="(e) => (e.target as HTMLImageElement).classList.add('is-loaded')" />
+                      </button>
+                      <span v-else class="dev-thumb-placeholder">—</span>
+                    </td>
+                    <td>
+                      <span class="dev-bucket-child-indent">↳</span>
+                      <code class="dev-object-key" style="display:inline">{{ thumb.key.split('/').slice(-2).join('/') }}</code>
+                    </td>
+                    <td class="dev-mono">{{ formatBytes(thumb.size) }}</td>
+                    <td class="dev-mono">{{ relativeTime(thumb.last_modified) }}</td>
+                    <td><span class="dev-muted" style="font-size:10px">thumbnail</span></td>
+                    <td></td>
+                  </tr>
+                  <!-- Face crops -->
+                  <tr
+                    v-for="face in group.faceObjects"
+                    :key="face.key"
+                    class="dev-bucket-child-row"
+                  >
+                    <td></td>
+                    <td class="dev-table-thumb-cell">
+                      <button v-if="face.src" class="dev-thumb-btn" @click="previewSrc = face.src">
+                        <img :src="face.src" class="dev-thumb lazy-img" style="border-radius:50%;object-fit:cover" @load="(e) => (e.target as HTMLImageElement).classList.add('is-loaded')" />
+                      </button>
+                      <span v-else class="dev-thumb-placeholder">—</span>
+                    </td>
+                    <td>
+                      <span class="dev-bucket-child-indent">↳</span>
+                      <code class="dev-object-key" style="display:inline">{{ face.key.split('/').pop() }}</code>
+                    </td>
+                    <td class="dev-mono">{{ formatBytes(face.size) }}</td>
+                    <td class="dev-mono">{{ relativeTime(face.last_modified) }}</td>
+                    <td><span class="dev-muted" style="font-size:10px;color:#a78bfa">face crop</span></td>
+                    <td></td>
+                  </tr>
+                  <!-- Version deltas -->
+                  <tr
+                    v-for="ver in group.versionObjects"
+                    :key="ver.key"
+                    class="dev-bucket-child-row"
+                  >
+                    <td></td>
+                    <td></td>
+                    <td>
+                      <span class="dev-bucket-child-indent">↳</span>
+                      <code class="dev-object-key" style="display:inline">{{ ver.key.split('/').slice(-3).join('/') }}</code>
+                    </td>
+                    <td class="dev-mono">{{ formatBytes(ver.size) }}</td>
+                    <td class="dev-mono">{{ relativeTime(ver.last_modified) }}</td>
+                    <td><span class="dev-muted" style="font-size:10px;color:#fbbf24">delta</span></td>
+                    <td></td>
+                  </tr>
+                </template>
               </template>
             </tbody>
           </table>
@@ -2010,9 +2128,9 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
             <p>Delete <strong>{{ groupMainFilename(deleteBucketGroup) }}</strong>?</p>
             <code class="dev-object-key-full" style="margin-top:4px;display:block">{{ deleteBucketGroup.prefix }}</code>
 
-            <label class="dev-dialog-check" v-if="deleteBucketGroup.thumbObject">
+            <label class="dev-dialog-check" v-if="deleteBucketGroup.thumbObjects.length">
               <input v-model="deleteBucketThumb" type="checkbox" />
-              Also delete thumbnail <span class="dev-muted">({{ deleteBucketGroup.thumbObject.key.split('/').pop() }})</span>
+              Also delete {{ deleteBucketGroup.thumbObjects.length }} thumbnail{{ deleteBucketGroup.thumbObjects.length !== 1 ? 's' : '' }}
             </label>
 
             <label class="dev-dialog-check" v-if="!deleteBucketGroup.isOrphan">
@@ -2656,26 +2774,62 @@ watch(bucketPageCount, (n) => { if (bucketPage.value > n) bucketPage.value = Mat
 }
 
 /* ── Bucket tree rows ────────────────────────────────────────────────────── */
-.dev-bucket-main-filename {
-  display: block;
+.dev-bucket-row-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.dev-bucket-uuid {
+  font-size: 12px;
+  font-family: 'Geist Mono', monospace;
+  color: var(--color-text-primary);
+  letter-spacing: 0.01em;
+}
+
+.dev-bucket-user-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-accent) 15%, transparent);
+  color: var(--color-accent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+  white-space: nowrap;
+}
+
+.dev-bucket-filename {
   font-size: 12px;
   color: var(--color-text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 280px;
+  margin-bottom: 3px;
 }
 
-.dev-bucket-has-thumb {
-  display: inline-block;
-  font-size: 10px;
-  color: var(--color-text-muted);
-  font-family: 'Geist Mono', monospace;
-  margin-left: 4px;
-  padding: 0 4px;
-  border: 1px solid var(--color-border);
-  border-radius: 3px;
+.dev-bucket-badges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
 }
+
+.dev-bucket-badge {
+  font-size: 10px;
+  font-family: 'Geist Mono', monospace;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  background: transparent;
+  color: var(--color-text-muted);
+  transition: background 0.15s;
+}
+.dev-bucket-badge:hover { background: color-mix(in srgb, var(--color-border) 50%, transparent); }
+.dev-bucket-badge-thumb { color: #6ee7b7; border-color: color-mix(in srgb, #6ee7b7 30%, transparent); }
+.dev-bucket-badge-face  { color: #a78bfa; border-color: color-mix(in srgb, #a78bfa 30%, transparent); }
+.dev-bucket-badge-version { color: #fbbf24; border-color: color-mix(in srgb, #fbbf24 30%, transparent); }
+.dev-bucket-badge-preview { color: #60a5fa; border-color: color-mix(in srgb, #60a5fa 30%, transparent); }
 
 .dev-bucket-child-row td {
   background: color-mix(in srgb, var(--color-surface) 60%, transparent);

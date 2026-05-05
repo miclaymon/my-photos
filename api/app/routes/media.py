@@ -24,7 +24,7 @@ from app.models.subject import Subject, SubjectDetection
 from app.models.tag import MediaTag, UserFavorite, UserTag
 from app.models.user import User
 from app.storage.s3 import delete_object, generate_presigned_download_url, generate_presigned_upload_url
-from app.utils.media_processing import enqueue_jobs, process_after_upload
+from app.utils.media_processing import THUMB_SIZES, enqueue_jobs, process_after_upload, thumb_size_key
 
 router = APIRouter()
 
@@ -71,8 +71,24 @@ def _check_owner_or_admin(media: Media, current_user: User) -> None:
 
 
 def _build_thumbnail_url(media: Media) -> Optional[str]:
-    key = media.thumbnail_object_key or media.object_key
+    """Return a single presigned thumbnail URL (256px preferred, legacy fallback)."""
+    if media.thumbnail_base_key:
+        key = thumb_size_key(media.thumbnail_base_key, 256)
+    else:
+        key = media.thumbnail_object_key or media.object_key
     return generate_presigned_download_url(key) if key else None
+
+
+def _build_thumbnails(media: Media) -> Optional[dict]:
+    """Return a dict of size → presigned URL for all available thumbnail sizes."""
+    if not media.thumbnail_base_key:
+        return None
+    result = {}
+    for size in THUMB_SIZES:
+        url = generate_presigned_download_url(thumb_size_key(media.thumbnail_base_key, size))
+        if url:
+            result[str(size)] = url
+    return result or None
 
 
 def _invalidate_media_libraries(db: Session, media_id: str) -> None:
@@ -93,7 +109,7 @@ def get_upload_url(
     current_user: User = Depends(get_current_user),
 ):
     safe = _safe_filename(body.filename)
-    object_key = f"{current_user.id}/{uuid.uuid4()}/{safe}"
+    object_key = f"{current_user.id}/{uuid.uuid4()}/media/{safe}"
     # Return a same-origin proxy path so the browser/SW uploads to our Nuxt
     # server instead of directly to S3. This avoids CORS issues when the storage
     # endpoint is on a different host.
@@ -222,11 +238,8 @@ def get_media(
     # Videos get a longer-lived URL so seeking still works after long pauses
     media_url_expiry = 21600 if is_video else 3600  # 6h for video, 1h for images
     image_url = generate_presigned_download_url(media.object_key, expires_in=media_url_expiry)
-    thumbnail_url = (
-        generate_presigned_download_url(media.thumbnail_object_key)
-        if media.thumbnail_object_key
-        else None
-    )
+    thumbnail_url = _build_thumbnail_url(media)
+    thumbnails = _build_thumbnails(media)
     preview_url = (
         generate_presigned_download_url(media.preview_object_key, expires_in=media_url_expiry)
         if media.preview_object_key
@@ -247,6 +260,7 @@ def get_media(
         "taken_at": media.taken_at.isoformat() if media.taken_at else None,
         "created_at": media.created_at.isoformat() if media.created_at else None,
         "thumbnail_object_key": media.thumbnail_object_key,
+        "thumbnail_base_key": media.thumbnail_base_key,
         "preview_object_key": media.preview_object_key,
         "exif_data": {k: v for k, v in (media.exif_data or {}).items() if k != "barcodes"} or None,
         "hash": media.hash,
@@ -260,6 +274,7 @@ def get_media(
         "location_processed_at": media.location_processed_at.isoformat() if media.location_processed_at else None,
         "image_url": image_url,
         "thumbnail_url": thumbnail_url,
+        "thumbnails": thumbnails,
         "preview_url": preview_url,
     }
 

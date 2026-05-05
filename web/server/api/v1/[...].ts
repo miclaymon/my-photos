@@ -13,8 +13,11 @@
  *   5. Returns the JSON response from FastAPI to the browser
  */
 import type { H3Event } from 'h3'
+import http from 'node:http'
+import https from 'node:https'
+import { Buffer } from 'node:buffer'
 
-const apiUrl: string|object = useRuntimeConfig()?.dataApiUrl ?? 'http://localhost:8000'
+const apiUrl: string = (useRuntimeConfig()?.dataApiUrl as string) ?? 'http://localhost:8000'
 
 async function tryRefresh(refreshToken: string): Promise<{ accessToken: string; refreshToken: string } | null> {
   try {
@@ -31,11 +34,71 @@ async function tryRefresh(refreshToken: string): Promise<{ accessToken: string; 
   }
 }
 
-async function forwardRequest(upstream: string, method: string, headers: Record<string, string>, bodyText: string | undefined): Promise<Response> {
+// Uses node:http/https directly instead of fetch() for the upstream proxy call.
+// req.setTimeout() + req.destroy() is a socket-level timeout that fires reliably
+// regardless of TCP state — unlike AbortSignal which can silently race with
+// Undici's internal error emission and leave the promise unresolved indefinitely.
+// Connection: close prevents keep-alive socket reuse so stale connections cannot
+// accumulate in Undici's pool between requests.
+async function forwardRequest(
+  upstream: string,
+  method:   string,
+  reqHeaders: Record<string, string>,
+  bodyText:   string | undefined,
+): Promise<Response> {
+  const url       = new URL(upstream)
+  const transport = url.protocol === 'https:' ? https : http
+
+  const attempt = () => new Promise<Response>((resolve, reject) => {
+    const body = bodyText !== undefined ? Buffer.from(bodyText, 'utf8') : undefined
+    const req  = transport.request(
+      {
+        hostname: url.hostname,
+        port:     url.port || (url.protocol === 'https:' ? '443' : '80'),
+        path:     url.pathname + (url.search ?? ''),
+        method,
+        // agent: false bypasses the global http.Agent socket pool entirely so
+        // every proxy call gets a raw fresh TCP connection. This is the only
+        // way to guarantee we never pick up a stale/half-closed socket from a
+        // previous request when the upstream keep-alive window has elapsed.
+        agent:   false,
+        headers:  {
+          ...reqHeaders,
+          'Connection': 'close',
+          ...(body ? { 'Content-Length': String(body.byteLength) } : {}),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () => {
+          const responseBody = Buffer.concat(chunks)
+          const headers: Record<string, string> = {}
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (v !== undefined) headers[k] = Array.isArray(v) ? v.join(', ') : (v as string)
+          }
+          resolve(new Response(responseBody, { status: res.statusCode ?? 502, headers }))
+        })
+        res.on('error', reject)
+      },
+    )
+
+    // Socket-level timeout: fires even when TCP is silently waiting (no FIN from server).
+    req.setTimeout(8_000, () => req.destroy(new Error('upstream timeout')))
+    req.on('error', reject)
+
+    if (body) req.write(body)
+    req.end()
+  })
+
   try {
-    return await fetch(upstream, { method, headers, body: bodyText })
+    return await attempt()
   } catch {
-    throw createError({ statusCode: 502, message: 'Data API unreachable' })
+    try {
+      return await attempt()
+    } catch {
+      throw createError({ statusCode: 502, message: 'Data API unreachable' })
+    }
   }
 }
 

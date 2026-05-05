@@ -24,8 +24,24 @@ from app.cache import clear_all as cache_clear_all, invalidate_key as cache_inva
 from app.config import settings
 from app.worker_config import get_config, update_config
 from app.app_config import get_config as get_app_config, update_config as update_app_config
+from app.utils.media_processing import THUMB_SIZES, thumb_size_key
 
 router = APIRouter()
+
+
+def _media_storage_keys(m: Media) -> list[str]:
+    """Return all S3 object keys associated with a media item (original, thumbnails, preview)."""
+    keys: list[str] = []
+    if m.object_key:
+        keys.append(m.object_key)
+    if m.thumbnail_base_key:
+        for size in THUMB_SIZES:
+            keys.append(thumb_size_key(m.thumbnail_base_key, size))
+    elif m.thumbnail_object_key:
+        keys.append(m.thumbnail_object_key)
+    if m.preview_object_key:
+        keys.append(m.preview_object_key)
+    return keys
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +139,10 @@ def overview(
 
     media_list = []
     for m in media_rows:
-        thumb_key = m.thumbnail_object_key or m.object_key
+        if m.thumbnail_base_key:
+            thumb_key = thumb_size_key(m.thumbnail_base_key, 256)
+        else:
+            thumb_key = m.thumbnail_object_key or m.object_key
         try:
             thumb_url = generate_presigned_download_url(thumb_key) if thumb_key else None
         except Exception:
@@ -240,12 +259,11 @@ def cleanup(
     failed = 0
     for m in expired:
         try:
-            for key in [m.object_key, m.thumbnail_object_key, m.preview_object_key]:
-                if key:
-                    try:
-                        delete_object(key)
-                    except Exception:
-                        pass
+            for key in _media_storage_keys(m):
+                try:
+                    delete_object(key)
+                except Exception:
+                    pass
             _delete_media_rows(db, m.id)
             db.delete(m)
             db.commit()
@@ -727,12 +745,11 @@ def delete_media(
         raise HTTPException(status_code=404, detail="Media not found")
 
     if delete_objects:
-        for key in [m.object_key, m.thumbnail_object_key, m.preview_object_key]:
-            if key:
-                try:
-                    delete_object(key)
-                except Exception:
-                    pass
+        for key in _media_storage_keys(m):
+            try:
+                delete_object(key)
+            except Exception:
+                pass
 
     _delete_media_rows(db, media_id)
     db.delete(m)
@@ -769,12 +786,11 @@ def delete_library(
         for mid in orphans:
             m = db.query(Media).filter(Media.id == mid).first()
             if m:
-                for key in [m.object_key, m.thumbnail_object_key, m.preview_object_key]:
-                    if key:
-                        try:
-                            delete_object(key)
-                        except Exception:
-                            pass
+                for key in _media_storage_keys(m):
+                    try:
+                        delete_object(key)
+                    except Exception:
+                        pass
                 _delete_media_rows(db, mid)
                 db.delete(m)
     elif body.mark_orphans_for_deletion:

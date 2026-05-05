@@ -12,6 +12,28 @@ export const GAP_VALUES: Record<GalleryGap, number> = {
   tight: 2, normal: 3, loose: 8,
 }
 
+const _ALL_THUMB_SIZES = [64, 96, 128, 256, 512]
+
+/**
+ * Returns the thumbnail sizes (px) to request from the API for a given gallery
+ * mode and size setting. Excludes sizes that are too small to ever be rendered
+ * in this configuration, and always includes a safety-net size for wide tiles.
+ *
+ * Grid tiles are square; masonry tiles vary in width (portrait → panoramic).
+ */
+export function thumbSizesForGallery(mode: GalleryMode, size: GallerySize): number[] {
+  const h = ROW_HEIGHTS[size]
+  // Grid tiles are fixed squares; masonry can yield tiles up to ~2× row height wide
+  const maxWidth = mode === 'grid' ? Math.round(h * 1.15) : Math.round(h * 2.2)
+  // Portrait tiles in masonry can be as narrow as ~half the row height
+  const minWidth = Math.round(h * 0.5)
+  const useful = _ALL_THUMB_SIZES.filter(s => s >= minWidth && s <= maxWidth)
+  // Ensure one size above maxWidth is always present so _pickThumbSize never returns undefined
+  const safetyTop = _ALL_THUMB_SIZES.find(s => s > maxWidth) ?? 512
+  if (!useful.includes(safetyTop)) useful.push(safetyTop)
+  return useful
+}
+
 // ── Per-gallery display config ─────────────────────────────────────────────────
 //
 // Each gallery has its own settings stored as JSON under `gallery#<id>`.

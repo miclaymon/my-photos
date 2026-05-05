@@ -23,9 +23,17 @@ const allIds = computed(() => allItems.value.map(i => i.id))
 
 const selected = computed(() => isSelected(props.item.id))
 
-// Prefer thumbnailSrc (server-resized, ~800px JPEG) when available for any media type.
-// For video tiles without a thumbnailSrc: skip the img entirely and render a <video> element instead.
+// Pick the best available thumbnail for the rendered tile width.
+// Multi-size thumbnails (new format): choose smallest size >= rendered width.
+// Fallback: legacy thumbnailSrc (256px single thumbnail).
+function _pickThumbSize(thumbnails: Record<string, string>, tileWidth: number): string | undefined {
+  const sizes = [64, 96, 128, 256, 512]
+  const best  = sizes.find(s => s >= tileWidth) ?? 512
+  return thumbnails[String(best)] ?? thumbnails['512']
+}
+
 const imgSrc = computed<string | undefined>(() => {
+  if (props.item.thumbnails) return _pickThumbSize(props.item.thumbnails, props.width)
   if (props.item.thumbnailSrc) return props.item.thumbnailSrc
   if (props.item.isVideo) return undefined   // <video> fallback renders instead
   return props.item.src ?? undefined

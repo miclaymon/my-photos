@@ -319,7 +319,7 @@ The app uses **PostgreSQL**. Schema is managed by Alembic migrations in `api/ale
 | Table | Purpose |
 |---|---|
 | `users` | User accounts (id, email, password_hash, display_name, is_admin) |
-| `media` | Photo/video metadata (object_key, dimensions, EXIF as JSONB, taken_at, location_label, processing timestamps) |
+| `media` | Photo/video metadata (object_key, thumbnail_base_key, dimensions, EXIF as JSONB, taken_at, location_label, processing timestamps) |
 | `libraries` | Named collections (personal or shared) |
 | `library_access` | Per-user library role assignments (owner / editor / viewer) |
 | `library_media` | Many-to-many: which media belongs to which library |
@@ -386,6 +386,8 @@ Albums are curated collections of media items within a library, with a defined s
 - Docker container bundling
 
 ### Recently shipped
+- **Multi-size thumbnails** — upload pipeline generates five WebP sizes (64/96/128/256/512 px) per item stored under `thumb/{size}.webp` with size-tuned quality (~4 KB target). Gallery API accepts `?thumbnail_sizes=64,128,256` to return only needed sizes; cache key includes the sizes param. Frontend computes required sizes from gallery mode and size setting; `MediaTile` selects the closest size to the rendered tile width. Backward-compatible with legacy single-thumbnail items.
+- **Gallery reliability** — BFF proxy (`web/server/api/v1/[...].ts`) switched from `fetch()` + AbortSignal to `node:http.request()` with a socket-level `req.setTimeout()` and `agent: false` (new TCP connection per request, no pool reuse). Uvicorn keep-alive timeout raised to 75 s. Eliminates 2-minute hangs caused by stale pooled connections. Hydration mismatch on gallery mode toggle fixed by wrapping it in `<ClientOnly>`.
 - **Video player** — VideoJS 8.x component with loop, fill mode, and automatic retry on network errors; X-Ray mode hidden for videos
 - **Preview UI overhaul** — removed image area padding for edge-to-edge display; close button moved to top-left; nav arrows fade after 2.5 s of mouse inactivity; touch swipe navigation (50 px threshold)
 - **Browser thumbnail caching** — presigned S3 download URLs snapped to UTC hour boundary (2 h expiry) so the same URL is generated for the same object within a given hour, enabling browser disk-cache hits natively

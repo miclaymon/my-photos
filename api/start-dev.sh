@@ -52,4 +52,4 @@ PORT="${API_PORT:-8000}"
 info "Starting FastAPI dev server on http://${HOST}:${PORT} …"
 info "API docs available at http://${HOST}:${PORT}/docs"
 echo ""
-".venv/bin/uvicorn" main:app --host "$HOST" --port "$PORT" --reload
+".venv/bin/uvicorn" main:app --host "$HOST" --port "$PORT" --reload --timeout-keep-alive 75

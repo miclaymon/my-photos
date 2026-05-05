@@ -22,6 +22,7 @@ from app.models.subject import Subject, SubjectDetection
 from app.models.tag import UserTag, MediaTag, UserFavorite
 from app.models.place import Place
 from app.storage.s3 import generate_presigned_download_url
+from app.utils.media_processing import THUMB_SIZES, thumb_size_key
 
 router = APIRouter()
 
@@ -75,6 +76,13 @@ def _presign(object_key: Optional[str]) -> Optional[str]:
         return None
 
 
+def _presign_media_thumb(m: "Media", size: int = 256) -> Optional[str]:
+    """Return a presigned URL for the best available thumbnail of a media item."""
+    if m.thumbnail_base_key:
+        return _presign(thumb_size_key(m.thumbnail_base_key, size))
+    return _presign(m.thumbnail_object_key or m.object_key)
+
+
 def _compute_dimensions(m: Media):
     """Return (aspect_ratio, width, height) with sensible defaults."""
     aspect_ratio = m.aspect_ratio
@@ -95,10 +103,21 @@ def _compute_dimensions(m: Media):
     return aspect_ratio, width, height
 
 
-def _serialize_media_item(m: Media) -> dict:
+def _build_thumbnails(m: Media, sizes: Optional[list] = None) -> Optional[dict]:
+    """Build a {size: presigned_url} dict when thumbnail_base_key is set."""
+    if not m.thumbnail_base_key:
+        return None
+    use_sizes = sizes if sizes is not None else THUMB_SIZES
+    return {
+        str(size): _presign(thumb_size_key(m.thumbnail_base_key, size))
+        for size in use_sizes
+    }
+
+
+def _serialize_media_item(m: Media, sizes: Optional[list] = None) -> dict:
     """Serialize a media row for the gallery list response.
 
-    Only the thumbnail URL is returned here — the full-resolution `src` and
+    Only thumbnail URLs are returned here — the full-resolution `src` and
     `preview_src` (video hover clip) are omitted deliberately:
       • The gallery tile only needs a small thumbnail; returning all three URLs
         generates 3× as many presigned-URL computations and causes 3× as many
@@ -115,7 +134,11 @@ def _serialize_media_item(m: Media) -> dict:
     date_src = m.taken_at or m.created_at
     taken_at = date_src.isoformat() if isinstance(date_src, datetime) else date_src
     is_video = m.content_type.startswith("video/")
-    has_thumbnail = bool(m.thumbnail_object_key)
+
+    thumbnails = _build_thumbnails(m, sizes)
+    # thumbnail_src: use 256px from new format or fall back to legacy single thumbnail
+    thumbnail_src = (thumbnails or {}).get("256") or _presign(m.thumbnail_object_key)
+    has_thumbnail = bool(thumbnails or m.thumbnail_object_key)
 
     return {
         "id": m.id,
@@ -132,7 +155,8 @@ def _serialize_media_item(m: Media) -> dict:
         # Images normally show via thumbnailSrc; this fallback keeps newly uploaded
         # items visible in the gallery while the background thumbnail job is pending.
         "src": _presign(m.object_key) if not has_thumbnail else None,
-        "thumbnail_src": _presign(m.thumbnail_object_key),
+        "thumbnail_src": thumbnail_src,
+        "thumbnails": thumbnails,
         # preview_src omitted — fetched on demand in the lightbox
         "preview_src": None,
     }
@@ -208,11 +232,21 @@ def list_library_media(
     before: Optional[str] = Query(default=None),
     after: Optional[str] = Query(default=None),
     cursor: Optional[str] = Query(default=None),   # alias for before
+    thumbnail_sizes: Optional[str] = Query(default=None),
     response: Response = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     before = before or cursor  # backwards compat
+
+    # Parse and validate thumbnail_sizes (e.g. "64,128,256")
+    _sizes: Optional[list] = None
+    if thumbnail_sizes:
+        try:
+            parsed = [int(s.strip()) for s in thumbnail_sizes.split(",") if s.strip()]
+            _sizes = [s for s in parsed if s in THUMB_SIZES] or None
+        except ValueError:
+            pass
 
     cache_cfg   = get_cache_config()
     _level      = cache_cfg.get("level", "high")
@@ -224,7 +258,7 @@ def list_library_media(
         elif _level in ("extreme", "high", "medium"):
             response.headers["Cache-Control"] = f"private, max-age={_media_ttl}"
 
-    _params = {"limit": limit, "before": before, "after": after}
+    _params = {"limit": limit, "before": before, "after": after, "thumbnail_sizes": thumbnail_sizes}
     _key = make_key(current_user.id, f"/{library_id}/media", _params)
     _media_path = f"/{library_id}/media?" + "&".join(
         f"{k}={v}" for k, v in sorted(_params.items()) if v is not None
@@ -308,7 +342,7 @@ def list_library_media(
         has_newer    = bool(before)  # if we paged with `before`, newer items exist above
 
     result = {
-        "items":        [_serialize_media_item(m) for m in page],
+        "items":        [_serialize_media_item(m, _sizes) for m in page],
         "has_older":    has_older,
         "has_newer":    has_newer,
         "older_cursor": older_cursor,
@@ -464,13 +498,13 @@ def list_albums(
         # Resolve thumbnail URLs for covers
         cover_urls: list[str] = []
         if cover_media_ids:
-            medias = (
-                db.query(Media.thumbnail_object_key)
+            cover_medias = (
+                db.query(Media)
                 .filter(Media.id.in_(cover_media_ids))
                 .all()
             )
-            for (key,) in medias:
-                url = _presign(key)
+            for cm in cover_medias:
+                url = _presign_media_thumb(cm, size=256)
                 if url:
                     cover_urls.append(url)
 
@@ -576,7 +610,7 @@ def list_subjects(
         if subj.cover_media_id:
             cover_media = db.query(Media).filter(Media.id == subj.cover_media_id).first()
             if cover_media:
-                thumbnail_url = _presign(cover_media.thumbnail_object_key)
+                thumbnail_url = _presign_media_thumb(cover_media)
         elif subj.representative_detection_id is not None:
             rep = db.query(SubjectDetection).filter(
                 SubjectDetection.id == subj.representative_detection_id
@@ -587,7 +621,7 @@ def list_subjects(
                 else:
                     rep_media = db.query(Media).filter(Media.id == rep.media_id).first()
                     if rep_media:
-                        thumbnail_url = _presign(rep_media.thumbnail_object_key)
+                        thumbnail_url = _presign_media_thumb(rep_media)
                 if subj.type == "person":
                     bounding_box = rep.bounding_box
 
@@ -619,7 +653,7 @@ def list_subjects(
             if any_obj:
                 pet_media = db.query(Media).filter(Media.id == any_obj.media_id).first()
                 if pet_media:
-                    thumbnail_url = _presign(pet_media.thumbnail_object_key or pet_media.object_key)
+                    thumbnail_url = _presign_media_thumb(pet_media)
 
         result.append({
             "id": subj.id,
@@ -675,7 +709,7 @@ def subject_media(
                 "media_id":         media.id,
                 "original_filename": media.original_filename,
                 "content_type":     media.content_type,
-                "thumbnail_url":    _presign(media.thumbnail_object_key or media.object_key),
+                "thumbnail_url":    _presign_media_thumb(media),
                 "face_crop_url":    _presign(det.face_crop_key) if det.face_crop_key else None,
                 "image_url":        _presign(media.object_key),
                 "taken_at":         taken_at,
@@ -708,7 +742,7 @@ def subject_media(
                     "media_id":          media.id,
                     "original_filename": media.original_filename,
                     "content_type":      media.content_type,
-                    "thumbnail_url":     _presign(media.thumbnail_object_key),
+                    "thumbnail_url":     _presign_media_thumb(media),
                     "image_url":         _presign(media.object_key),
                     "taken_at":          taken_at,
                     "width":             media.width,
@@ -766,8 +800,8 @@ def list_favorites(
             "aspectRatio":      media.aspect_ratio or 1.5,
             "isVideo":          is_video,
             "takenAt":          taken_at,
-            "thumbnailSrc":     _presign(media.thumbnail_object_key),
-            "src":              _presign(media.object_key) if is_video and not media.thumbnail_object_key else None,
+            "thumbnailSrc":     _presign_media_thumb(media),
+            "src":              _presign(media.object_key) if is_video and not (media.thumbnail_base_key or media.thumbnail_object_key) else None,
         })
 
     return {"items": items}
@@ -841,7 +875,7 @@ def list_places(
         )
         cover_urls = [
             url for m in cover_media
-            if (url := _presign(m.thumbnail_object_key or m.object_key))
+            if (url := _presign_media_thumb(m))
         ]
 
         result.append({
@@ -921,7 +955,7 @@ def place_items(
             "aspectRatio": media.aspect_ratio or 1.5,
             "isVideo": (media.content_type or "").startswith("video/"),
             "takenAt": taken_at,
-            "thumbnailSrc": _presign(media.thumbnail_object_key),
+            "thumbnailSrc": _presign_media_thumb(media),
             "src": _presign(media.object_key),
         })
 
@@ -1016,7 +1050,7 @@ def get_tag(
         items.append({
             "id": media.id,
             "original_filename": media.original_filename,
-            "thumbnail_url": _presign(media.thumbnail_object_key),
+            "thumbnail_url": _presign_media_thumb(media),
             "image_url": _presign(media.object_key),
             "taken_at": taken_at,
         })
@@ -1199,7 +1233,7 @@ def list_archive(
             "isVideo": (media.content_type or "").startswith("video/"),
             "takenAt": taken_at,
             "archivedAt": archived_at,
-            "thumbnailSrc": _presign(media.thumbnail_object_key),
+            "thumbnailSrc": _presign_media_thumb(media),
             "src": _presign(media.object_key),
         })
 
@@ -1240,8 +1274,8 @@ def list_private(
             "aspectRatio": media.aspect_ratio or 1.5,
             "isVideo": (media.content_type or "").startswith("video/"),
             "takenAt": taken_at,
-            "thumbnailSrc": _presign(media.thumbnail_object_key),
-            "src": _presign(media.object_key) if (media.content_type or "").startswith("video/") and not media.thumbnail_object_key else None,
+            "thumbnailSrc": _presign_media_thumb(media),
+            "src": _presign(media.object_key) if (media.content_type or "").startswith("video/") and not (media.thumbnail_base_key or media.thumbnail_object_key) else None,
         })
 
     return {"items": items}
@@ -1286,7 +1320,7 @@ def list_trash(
             "isVideo": (media.content_type or "").startswith("video/"),
             "takenAt": taken_at,
             "deletionDate": deletion_date,
-            "thumbnailSrc": _presign(media.thumbnail_object_key),
+            "thumbnailSrc": _presign_media_thumb(media),
             "src": _presign(media.object_key),
         })
 
